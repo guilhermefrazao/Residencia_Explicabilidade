@@ -1,0 +1,6 @@
+/datasets
+/checkpoint
+/wandb
+/runs/
+__pycache__
+.env
