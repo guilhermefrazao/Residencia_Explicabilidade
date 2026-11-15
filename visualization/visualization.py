@@ -13,10 +13,12 @@ except Exception:
 
 import matplotlib.pyplot as plt
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import LineCollection
-from matplotlib.colors import Colormap, LinearSegmentedColormap, Normalize
+from matplotlib.colors import Colormap, LinearSegmentedColormap, Normalize, to_rgb
 from matplotlib.figure import Figure
 
 
@@ -25,18 +27,8 @@ plt.style.use("Solarize_Light2")
 OUT = "images"
 GRAY, LINE, BLUE, RED, CREAM = "#eee8d5", "#93a1a1", "#268bd2", "#dc322f", "#fdf6e3"
 DIVERGING = LinearSegmentedColormap.from_list("solarized_div", [RED, CREAM, BLUE]) 
-POSITIVE = LinearSegmentedColormap.from_list("solarized_pos", [GRAY, BLUE])  
-
-
-def save_figure(fig: Figure, name: str, out: str):
-    os.makedirs(out, exist_ok=True)
-
-    path = os.path.join(out, name)
-
-    fig.savefig(path, dpi=130)
-    plt.close(fig)
-
-    print(f"figura salva em {path}")
+POSITIVE = LinearSegmentedColormap.from_list("solarized_pos", [GRAY, BLUE])
+NEGATIVE = LinearSegmentedColormap.from_list("solarized_neg", [GRAY, RED])  
 
 
 def add_colorbar(fig: Figure, axes: np.ndarray, cmap: Colormap, lo: float, hi: float, label: str):
@@ -102,39 +94,6 @@ def draw_network(ax: Axes, sizes: list, values: dict = None, cmap: Colormap = DI
         ax.set_title(title, fontsize=10)
 
 
-def plot_neuron_contributions(contribs: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, sizes: list, n_images: int = 3, out: str = OUT):
-    signed = [c[:, : c.shape[1] // 2] + c[:, c.shape[1] // 2:] for c in contribs] 
-    vmax = max(np.abs(s[:n_images]).max() for s in signed)
-
-    fig, axes = plt.subplots(n_images, 1, figsize=(9, 4.6 * n_images), squeeze=False, layout="constrained")
-
-    for i, ax in enumerate(axes[:, 0]):
-        values = {a: s[i] for a, s in enumerate(signed)}
-        title = f"imagem {i} | rótulo {y[i]} | predito {preds[i]} (círculo laranja)"
-
-        draw_network(ax, sizes, values=values, cmap=DIVERGING, vmax=vmax, image=X[i], highlight=preds[i], title=title)
-
-    add_colorbar(fig, axes, DIVERGING, -vmax, vmax, "contribuição do neurônio (vermelho < 0 < azul)")
-
-    save_figure(fig, "1_contribuicao_por_neuronio.png", out)
-
-
-def plot_positive_data(datas: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, sizes: list, n_images: int = 3, out: str = OUT):
-    vmax = max(d[:n_images].max() for d in datas)
-
-    fig, axes = plt.subplots(n_images, 1, figsize=(9, 4.6 * n_images), squeeze=False, layout="constrained")
-
-    for i, ax in enumerate(axes[:, 0]):
-        values = {a: d[i] for a, d in enumerate(datas)}
-        title = f"T da imagem {i} | rótulo {y[i]} | predito {preds[i]} (negativas = 0, cinza)"
-
-        draw_network(ax, sizes, values=values, cmap=POSITIVE, vmin=0, vmax=vmax, image=X[i], highlight=preds[i], title=title)
-
-    add_colorbar(fig, axes, POSITIVE, 0, vmax, "T (contribuição positiva normalizada)")
-
-    save_figure(fig, "2_T_contribuicoes_positivas.png", out)
-
-
 def draw_bars(ax: Axes, v: np.ndarray, lim: float):
     ax.bar(np.arange(len(v)), v, color=np.where(v >= 0, BLUE, RED), width=0.8)
     ax.axhline(0, color="k", lw=0.5)
@@ -142,137 +101,170 @@ def draw_bars(ax: Axes, v: np.ndarray, lim: float):
     ax.tick_params(labelsize=6)
 
 
-def plot_modes(T: np.ndarray, loadings: np.ndarray, dictionary: np.ndarray, X: np.ndarray, y: np.ndarray, layer: int, n_images: int = 5, n_modes: int = 5, out: str = OUT):
-    modes = [int(k) for k in np.argsort(-loadings[:n_images].sum(0))[:n_modes]]
-
-    rec = loadings @ dictionary
-    n_cols = 3 + len(modes)
-
-    fig, axes = plt.subplots(n_images, n_cols, figsize=(2.1 * n_cols, 1.7 * n_images + 1.2), squeeze=False, layout="constrained")
-
-    for i in range(n_images):
-        terms = [loadings[i, k] * dictionary[k] for k in modes]
-        lim = 1.1 * max(np.abs(T[i]).max(), np.abs(rec[i]).max(), *(np.abs(t).max() for t in terms), 1e-9)
-
-        axes[i, 0].imshow(X[i], cmap="gray")
-        axes[i, 0].set_xticks([])
-        axes[i, 0].set_yticks([])
-        axes[i, 0].set_ylabel(f"rótulo {y[i]}")
-
-        draw_bars(axes[i, 1], T[i], lim)
-
-        for j, k in enumerate(modes):
-            ax = axes[i, 2 + j]
-
-            draw_bars(ax, terms[j], lim)
-            ax.text(0.5, 0.97, f"presença {loadings[i, k]:.2f}", transform=ax.transAxes, ha="center", va="top", fontsize=7)
-
-        draw_bars(axes[i, -1], rec[i], lim)
-        axes[i, -1].plot(T[i], "k.", ms=4)
-
-    titles = ["imagem", "T[i] (real)"] + [f"modo {k}\n(loadings × átomo)" for k in modes] + ["reconstrução\n(• = T real)"]
-
-    for ax, title in zip(axes[0], titles):
-        ax.set_title(title, fontsize=8)
-
-    for ax in axes[-1, 1:]:
-        ax.set_xlabel("neurônio", fontsize=7)
-
-    fig.suptitle(f"Camada {layer + 1}: T[i] ≈ Σ loadings[i,k] · modo_k  (barras = neurônios; azul > 0, vermelho < 0)", fontsize=10)
-
-    save_figure(fig, f"3_modos_camada{layer + 1}.png", out)
+def with_total(maps: np.ndarray):
+    return np.concatenate([maps, maps.sum(1, keepdims=True)], axis=1)  # última coluna = soma dos mapas de todos os modos
 
 
-def plot_mode_weights(dictionary: np.ndarray, sizes: list, layer: int, corr: np.ndarray = None, n_modes: int = 5, out: str = OUT):
-    n_atoms = dictionary.shape[0]
+def class_scales(*maps: np.ndarray):
+    # escala por dígito: as colunas dos modos dividem o máximo da linha (entre todos os mapas dados); a coluna "soma" tem escala própria
+    peak = np.max([m.max(axis=(2, 3)) for m in maps], axis=0)
+    peak[:, :-1] = peak[:, :-1].max(1, keepdims=True)
 
-    if corr is not None and corr.shape[1] == n_atoms:
-        modes = np.argsort(-corr.max(0))[:n_modes] 
-    else:
-        modes = np.arange(min(n_modes, n_atoms))
-
-    vmax = np.abs(dictionary[modes]).max()
-    n_rows = int(np.ceil(len(modes) / 2))
-
-    fig, axes = plt.subplots(n_rows, 2, figsize=(16, 4.4 * n_rows), squeeze=False, layout="constrained")
-
-    for ax, k in zip(axes.ravel(), modes):
-        extra = f" | melhor dígito {corr[:, k].argmax()} (corr {corr[:, k].max():.2f})" if corr is not None else ""
-
-        draw_network(ax, sizes, values={layer: dictionary[k]}, cmap=DIVERGING, vmax=vmax, title=f"modo {k}{extra}")
-
-    for ax in axes.ravel()[len(modes):]:
-        ax.axis("off")
-
-    add_colorbar(fig, axes, DIVERGING, -vmax, vmax, "peso do neurônio no modo (vermelho < 0 < azul)")
-
-    fig.suptitle(f"Pesos do dicionário na camada {layer + 1} (cinza = camadas não analisadas)", fontsize=11)
-
-    save_figure(fig, f"4_pesos_dos_modos_camada{layer + 1}.png", out)
+    return np.maximum(peak, 1e-9)[..., None, None]
 
 
-def visualize_all(sizes: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, contribs: list, datas: list, loadings: list, dictionaries: list, corrs: list, out: str = OUT, n_images: int = 3):
-    plot_neuron_contributions(contribs, X, y, preds, sizes, n_images=n_images, out=out)
-    plot_positive_data(datas, X, y, preds, sizes, n_images=n_images, out=out)
+class Visualization:
+    def __init__(self, dataset: str, network: str, out: str = OUT):
+        date = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d-%m-%Y - %H:%M")
 
-    for l, (T, loading, dictionary, corr) in enumerate(zip(datas, loadings, dictionaries, corrs)):
-        if loading.shape[1] == 0:
-            print(f"camada {l + 1}: sem modos vivos, figuras 3 e 4 puladas")
-            continue
+        self.out = os.path.join(out, f"{dataset}_{network}_{date}")
 
-        plot_modes(T, loading, dictionary, X, y, l, out=out)
-        plot_mode_weights(dictionary, sizes, l, corr=corr, out=out)
+    def save_figure(self, fig: Figure, name: str, show: bool = False):
+        os.makedirs(self.out, exist_ok=True)
 
+        path = os.path.join(self.out, name)
 
-def plot_pixel_maps(X: np.ndarray, maps: np.ndarray, y: np.ndarray, layer: int, out: str = OUT):
-    n_images, n_modes = maps.shape[:2]
-    vmax = np.abs(maps).max()
+        fig.savefig(path, dpi=130)
 
-    fig, axes = plt.subplots(n_modes + 1, n_images, figsize=(2.2 * n_images, 2.2 * (n_modes + 1)), squeeze=False, layout="constrained")
+        if show:
+            plt.show()
 
-    for i in range(n_images):
-        axes[0, i].imshow(X[i], cmap="gray")
-        axes[0, i].set_title(f"rótulo {y[i]}", fontsize=9)
+        plt.close(fig)
 
-        for k in range(n_modes):
-            axes[k + 1, i].imshow(maps[i, k], cmap=DIVERGING, vmin=-vmax, vmax=vmax)
-
-    for ax in axes.ravel():
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    for k in range(n_modes):
-        axes[k + 1, 0].set_ylabel(f"modo {k}")
-
-    add_colorbar(fig, axes, DIVERGING, -vmax, vmax, "contribuição do pixel (vermelho < 0 < azul)")
-
-    save_figure(fig, f"5_mapas_de_pixels_camada{layer + 1}.png", out)
+        print(f"figura salva em {path}")
 
 
-def visualize_neural_contributions(log_contribution: np.ndarray, layer: int = 0, out: str = OUT):
-    """log_contribution: scope.log_contributions[layer], shape [N, 2*H] = [parte negativa | parte positiva] (ei_split)."""
-    H = log_contribution.shape[1] // 2
-    neg, pos = log_contribution[:, :H], log_contribution[:, H:]
+    def plot_neuron_contributions(self, contribs: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, sizes: list, n_images: int = 3):
+        # contribs = scope.log_contributions (compute_contributions): por camada, [N, 2H] = [parte negativa | parte positiva] (ei_split)
+        # negativa + positiva = contribuição com sinal de cada neurônio, por imagem
+        signed = [c[:, : c.shape[1] // 2] + c[:, c.shape[1] // 2:] for c in contribs]
+        vmax = max(np.abs(s[:n_images]).max() for s in signed)
 
-    total_pos = pos.sum(axis=0)           # [H] soma sobre as N amostras
-    total_neg = np.abs(neg).sum(axis=0)   # [H]
-    total_abs = total_pos + total_neg
+        fig, axes = plt.subplots(n_images, 1, figsize=(9, 4.6 * n_images), squeeze=False, layout="constrained")
 
-    print(f"log_contribution: {log_contribution.shape} -> [N amostras, 2*H] com H={H} neurônios")
-    print(f"  negativa {neg.shape} | positiva {pos.shape} | soma por neurônio {total_abs.shape}")
-    print(f"  soma positiva : {np.round(total_pos, 2)}")
-    print(f"  soma |negativa|: {np.round(total_neg, 2)}")
+        for i, ax in enumerate(axes[:, 0]):
+            # contribuição da imagem i em cada camada | X[i]: imagem de teste, y[i]: rótulo do dataset, preds[i]: argmax da saída da rede
+            values = {a: s[i] for a, s in enumerate(signed)}
+            title = f"imagem {i} | rótulo {y[i]} | predito {preds[i]} (círculo laranja)"
 
-    fig = plt.figure(figsize=(10, 4))
-    idx = np.arange(H)
-    plt.bar(idx, total_pos, color=BLUE, label="contribuição positiva")
-    plt.bar(idx, total_neg, bottom=total_pos, color=RED, label="|contribuição negativa|")
-    plt.xlabel("Índice do neurônio")
-    plt.ylabel("Contribuição absoluta total (soma sobre as amostras)")
-    plt.title(f"Contribuição por neurônio na camada {layer + 1} ({log_contribution.shape[0]} amostras)")
-    plt.legend()
-    plt.tight_layout()
+            draw_network(ax, sizes, values=values, cmap=DIVERGING, vmax=vmax, image=X[i], highlight=preds[i], title=title)
 
-    os.makedirs(out, exist_ok=True)
-    fig.savefig(os.path.join(out, f"contributions_layer{layer + 1}_1.png"), dpi=130)
-    plt.show()
+        add_colorbar(fig, axes, DIVERGING, -vmax, vmax, "contribuição do neurônio (vermelho < 0 < azul)")
+
+        self.save_figure(fig, "1_contribuicao_por_neuronio.png")
+
+
+    def plot_positive_data(self, datas: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, sizes: list, n_images: int = 3):
+        # datas = retorno de compute_neural_correlations: metade positiva de log_contributions[l] dividida pelo desvio padrão global (o T que entra no SAE)
+        vmax = max(d[:n_images].max() for d in datas)
+
+        fig, axes = plt.subplots(n_images, 1, figsize=(9, 4.6 * n_images), squeeze=False, layout="constrained")
+
+        for i, ax in enumerate(axes[:, 0]):
+            # T da imagem i em cada camada (negativas já zeradas)
+            values = {a: d[i] for a, d in enumerate(datas)}
+            title = f"T da imagem {i} | rótulo {y[i]} | predito {preds[i]} (negativas = 0, cinza)"
+
+            draw_network(ax, sizes, values=values, cmap=POSITIVE, vmin=0, vmax=vmax, image=X[i], highlight=preds[i], title=title)
+
+        add_colorbar(fig, axes, POSITIVE, 0, vmax, "T (contribuição positiva normalizada)")
+
+        self.save_figure(fig, "2_T_contribuicoes_positivas.png")
+
+
+    def plot_mode_weights(self, dictionary: np.ndarray, corr: np.ndarray, layer: int, label: int):
+        # corr = bscope.mtx_corr(digits, loadings) (correlation_results), [dígitos, modos vivos]; argmax(0) = dígito mais correlacionado de cada modo
+        modes = np.where(corr.argmax(0) == label)[0]
+        modes = modes[np.argsort(-corr[label, modes])]
+
+        if len(modes) == 0:
+            print(f"camada {layer + 1}: nenhum modo tem o dígito {label} como maior correlação")
+            return
+
+        # dictionary = sae.dictionary (load_sae), só modos vivos: linha k = pesos do átomo k sobre os neurônios da camada
+        weights = dictionary[modes]
+        n_neurons = weights.shape[1]
+        vmax = np.abs(weights).max()
+
+        fig, (ax_weights, ax_total) = plt.subplots(2, 1, figsize=(0.6 * n_neurons + 3, 0.45 * len(modes) + 4), height_ratios=[len(modes), 3], sharex=True, layout="constrained")
+
+        image = ax_weights.imshow(weights, cmap=DIVERGING, vmin=-vmax, vmax=vmax, aspect="auto")
+        ax_weights.grid(False)
+        ax_weights.set_yticks(np.arange(len(modes)), [f"modo {k} (corr {corr[label, k]:.2f})" for k in modes])
+        fig.colorbar(image, ax=ax_weights, label="peso no modo")
+
+        ax_total.bar(np.arange(n_neurons), np.abs(weights).sum(0), color=BLUE)
+        ax_total.set_xticks(np.arange(n_neurons))
+        ax_total.set_xlabel("neurônio")
+        ax_total.set_ylabel("Σ |peso| dos modos")
+
+        fig.suptitle(f"Camada {layer + 1}: {len(modes)} modos mais correlacionados com o dígito {label}", fontsize=11)
+
+        self.save_figure(fig, f"3_pesos_dos_modos_digito{label}_camada{layer + 1}.png")
+
+
+    def visualize_all(self, sizes: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, contribs: list, dictionaries: list, corrs: list, label: int, n_images: int = 3):
+        self.plot_neuron_contributions(contribs, X, y, preds, sizes, n_images=n_images)
+
+        for l, (dictionary, corr) in enumerate(zip(dictionaries, corrs)):
+            if corr is None:
+                print(f"camada {l + 1}: sem modos vivos, pesos dos modos pulados")
+                continue
+
+            self.plot_mode_weights(dictionary, corr, l, label)
+
+
+    def plot_class_grid(self, panels: np.ndarray, layer: int, title: str, filename: str):
+        n_digits, n_cols = panels.shape[:2]
+
+        fig, axes = plt.subplots(n_digits, n_cols, figsize=(0.9 * n_cols, 0.9 * n_digits + 1), squeeze=False, layout="constrained")
+
+        for digit, row in enumerate(axes):
+            for ax, panel in zip(row, panels[digit]):
+                ax.imshow(panel)
+                ax.set_xticks([])
+                ax.set_yticks([])
+
+            row[0].set_ylabel(f"{digit}")
+
+        for k, ax in enumerate(axes[0]):
+            ax.set_title("soma" if k == n_cols - 1 else f"{k}", fontsize=7)
+
+        fig.suptitle(f"Camada {layer + 1}: {title}", fontsize=10)
+
+        self.save_figure(fig, filename)
+
+    def plot_class_mode_maps(self, maps: np.ndarray, layer: int, name: str, cmap: Colormap):
+        # maps = expanded_contributions.class_mode_maps: [dígitos, modos, H, W], média das imagens acertadas de cada dígito (gradiente × entrada ponderado pelos átomos)
+        maps = with_total(maps)
+        panels = cmap(maps / class_scales(maps))[..., :3]
+
+        self.plot_class_grid(panels, layer, f"contribuições {name} (magnitude) médias por dígito (linhas) e modo (colunas) | escala por dígito (soma tem escala própria)", f"5_mapas_{name}_por_digito_camada{layer + 1}.png")
+
+    def plot_class_mode_maps_joint(self, positive: np.ndarray, negative: np.ndarray, layer: int):
+        # positive e negative = expanded_contributions.class_mode_maps, [dígitos, modos, H, W]; negative passado em magnitude (-negative)
+        positive, negative = with_total(positive), with_total(negative)
+        scales = class_scales(positive, negative)
+
+        # pintura subtrativa sobre o fundo: positivo tinge de azul, negativo de vermelho; pixels com os dois ficam escuros (sem cancelamento)
+        base, blue, red = (np.array(to_rgb(c)) for c in (CREAM, BLUE, RED))
+        panels = base - (positive / scales)[..., None] * (base - blue) - (negative / scales)[..., None] * (base - red)
+
+        self.plot_class_grid(np.clip(panels, 0, 1), layer, "contribuições positivas (azul) e negativas (vermelho) médias por dígito (linhas) e modo (colunas) | mesma escala para as duas (soma tem escala própria)", f"5_mapas_conjuntos_por_digito_camada{layer + 1}.png")
+
+    def plot_label_images(self, images: np.ndarray, modes: np.ndarray, label: int, layer: int, n_cols: int = 10):
+        # images = imagens de teste do dígito (dataset.data); modes = modo de maior loading de cada imagem (loadings_layer_{l}.npy, argmax)
+        n_rows = int(np.ceil(len(images) / n_cols))
+
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(1.3 * n_cols, 1.4 * n_rows + 0.8), squeeze=False, layout="constrained")
+
+        for ax in axes.ravel():
+            ax.axis("off")
+
+        for ax, image, mode in zip(axes.ravel(), images, modes):
+            ax.imshow(image, cmap="gray")
+            ax.set_title(f"modo {mode}", fontsize=7)
+
+        fig.suptitle(f"Dígito {label}: {len(images)} imagens do teste, ordenadas pelo modo dominante da camada {layer + 1}", fontsize=10)
+
+        self.save_figure(fig, f"5_imagens_do_digito_{label}_camada{layer + 1}.png")

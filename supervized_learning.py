@@ -70,22 +70,22 @@ def test(test_dataloader, model: nn.Module, criterion, device):
     
 
 
-def main(checkpoints="checkpoint/test"):
+def main(checkpoints="checkpoint/test", dataset: str ="Mnist", model: str ="MLP", loss_type: str ="CrossEntropy", optimizer_type: str = "Adam"):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    train_dataloader, test_dataloader = setup_dataset("Mnist")
+    train_dataloader, test_dataloader = setup_dataset(dataset_type=dataset)
 
-    model = setup_model(model_type="MLP", device=device)
+    model = setup_model(model_type=model, device=device)
 
-    criterion = setup_loss_type(loss_type="CrossEntropy")
+    criterion = setup_loss_type(loss_type=loss_type)
 
     lr = 0.001
 
-    optimizer = setup_optimizer(model=model, optimizer_type="Adam")
+    optimizer = setup_optimizer(model=model, optimizer_type=optimizer_type, learning_rate=lr)
 
     date = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
-    wandb_run = setup_wandb(run_name=f"{type(model).__name__}_adam_{date.strftime('%d/%m/%Y - %H:%M')}", config=None)
+    wandb_run = setup_wandb(run_name=f"{type(model).__name__}_{optimizer_type}_{date.strftime('%d/%m/%Y - %H:%M')}", config=None)
 
     train(n_epochs=20, train_dataloader=train_dataloader, test_dataloader=test_dataloader, optimizer=optimizer, model=model, criterion=criterion, wandb_run=wandb_run, lr=lr, device=device)
 

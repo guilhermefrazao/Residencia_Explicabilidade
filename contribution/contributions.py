@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from tqdm import tqdm
 from torch import nn
 from setup import setup_model, setup_dataset, setup_optimizer, setup_wandb
-from visualization.visualization import visualize_all, visualize_neural_contributions, plot_pixel_maps
+from visualization.visualization import Visualization
 
 
 def compute_contributions(model: nn.Module, layers: list, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray):
@@ -25,17 +25,29 @@ def compute_contributions(model: nn.Module, layers: list, test_dataset_x: torch.
     return scope, digits
 
 
-def mode_pixel_maps(model: nn.Module, x: torch.Tensor, atoms: np.ndarray, layer: int, device: str):
-    x = x.to(device).clone().requires_grad_()
-    h = model.network[: 2 * layer + 1](model.flatten(x))
-    probs = torch.softmax(model.network[2 * layer + 1:](h), dim=-1)
+def mode_pixel_maps(model: nn.Module, test_dataset_x_five_images: torch.Tensor, atoms: np.ndarray, layer: int, device: str):
+    test_dataset_x_five_images = test_dataset_x_five_images.to(device).clone().requires_grad_()
 
-    dy_dh, = torch.autograd.grad(probs.max(1).values.sum(), h, retain_graph=True)
+    h = model.network[: 2 * layer + 1](model.flatten(test_dataset_x_five_images))
+    print(f"h: {h}", f"Dim: {h.shape} \n")
+
+    logits = model.network[2 * layer + 1:](h)
+
+    probs = torch.softmax(logits, dim=-1)
+
+    top_prob = probs.max(1).values
+
+    dy_dh, = torch.autograd.grad(top_prob.sum(), h, retain_graph=True) 
+    print(f"dy_dh: {dy_dh}", f"Dim: {dy_dh.shape} \n")
+
     atoms = torch.as_tensor(atoms, dtype=h.dtype, device=device)
+    print(f"Atoms: {atoms}", f"Dim: {atoms.shape} \n")
 
-    maps = [x * torch.autograd.grad(h, x, grad_outputs=atom * dy_dh, retain_graph=True)[0] for atom in atoms]
+    maps = [test_dataset_x_five_images * torch.autograd.grad(h, test_dataset_x_five_images, grad_outputs=atom * dy_dh, retain_graph=True)[0] for atom in atoms]
+    print(f"maps: {maps}", f"Dim: {maps.shape} \n")
+    maps = torch.stack(maps, dim=1)
 
-    return torch.stack(maps, dim=1).detach().cpu().numpy()
+    return maps.detach().cpu().numpy()
 
 
 def compute_neural_correlations(scope: bscope.Scope, layers: list, device: str, model_path: str):
@@ -123,25 +135,25 @@ def correlation_results(digits: np.ndarray, model_path: str, datas: list, device
     return loadings_all, dicts, corrs
 
 
-def visualization(model: nn.Module, scope: bscope.Scope, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray, datas: list, loadings_all: list, dicts: list, corrs: list, device: str):
+def visualization(visualizer: Visualization, model: nn.Module, scope: bscope.Scope, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray, datas: list, loadings_all: list, dicts: list, corrs: list, label: int, device: str):
     with torch.no_grad():
         preds = model(test_dataset_x.unsqueeze(1).to(device)).argmax(1).cpu().numpy()
 
     sizes = [data.shape[1] for data in datas] + [10]
 
-    visualize_all(sizes=sizes, X=test_dataset_x.numpy(), y=test_dataset_y, preds=preds, contribs=scope.log_contributions, datas=datas, loadings=loadings_all, dictionaries=dicts, corrs=corrs)
+    visualizer.visualize_all(sizes=sizes, X=test_dataset_x.numpy(), y=test_dataset_y, preds=preds, contribs=scope.log_contributions, dictionaries=dicts, corrs=corrs, label=label)
 
 
-def main(model_path="checkpoint/test"):
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", label_visualize=7):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = setup_model(model_type="MLP", device=device)
+    model = setup_model(model_type=model_type, device=device)
 
     model.load_state_dict(torch.load(f"{model_path}/model.pt", map_location=device))
 
     layers = [model.network[0], model.network[2]]
 
-    _, test_dataloader = setup_dataset(dataset_type="Mnist")
+    _, test_dataloader = setup_dataset(dataset_type=dataset_type)
 
     test_dataset_x, test_dataset_y = test_dataloader.dataset.data.float() / 255, test_dataloader.dataset.targets.numpy()
 
@@ -151,11 +163,7 @@ def main(model_path="checkpoint/test"):
 
     loadings_all, dicts, corrs = correlation_results(digits=digits, model_path=model_path, datas=datas, device=device)
 
-    visualization(model=model, scope=scope, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y, datas=datas, loadings_all=loadings_all, dicts=dicts, corrs=corrs, device=device)
-
-    maps = mode_pixel_maps(model, test_dataset_x[:5], dicts[0][:5], layer=0, device=device)
-    
-    plot_pixel_maps(test_dataset_x[:5].numpy(), maps, test_dataset_y[:5], layer=0)
+    visualization(visualizer=Visualization(dataset=dataset_type, network=model_type), model=model, scope=scope, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y, datas=datas, loadings_all=loadings_all, dicts=dicts, corrs=corrs, label=label_visualize, device=device)
 
 
 if __name__ == "__main__":
