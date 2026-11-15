@@ -5,20 +5,23 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from tqdm import tqdm
 from torch import nn
-from setup import setup_model, setup_dataset, setup_optimizer, setup_wandb
+from setup import setup_model, setup_layers, setup_dataset, setup_test_data, setup_optimizer, setup_wandb
 from visualization.visualization import Visualization
 
 
-def compute_contributions(model: nn.Module, layers: list, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray):
+def compute_contributions(model: nn.Module, layers: list, reduction: list, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray):
     scope = bscope.Scope(model, layers, to_numpy=True)
     scope.use_int_grad(steps=20)
     scope.wrt_topk(k=1, softmax=True)
-    scope.log_start(reduction=["ei_split"])
+    scope.log_start(reduction=reduction)
 
     for xb in tqdm(test_dataset_x.split(128)):
         scope(xb)
 
     scope.log_stop()
+
+    # camadas convolucionais ficam [N, 2C, H, W] (ei_split já separou positivo/negativo por posição); soma o espaço para virar [N, 2C], como nas camadas fc
+    scope.log_contributions = [c.sum(axis=(2, 3)) if c.ndim == 4 else c for c in scope.log_contributions]
 
     digits = np.eye(10)[test_dataset_y]
 
@@ -116,15 +119,18 @@ def correlation_results(digits: np.ndarray, model_path: str, datas: list, device
 
         loadings_all.append(loadings); dicts.append(dictionary)
 
-        if loadings.shape[1] == 0:
-            print("Nenhum modo vivo: o SAE colapsou, treine de novo (ou use threshold menor / rede mais larga)")
-            corrs.append(None)
-            continue
+        has_modes = loadings.shape[1] > 0
+        corr = np.nan_to_num(bscope.mtx_corr(digits, loadings)) if has_modes else np.zeros((digits.shape[1], 0))
 
-        corr = np.nan_to_num(bscope.mtx_corr(digits, loadings))
         np.save(f"{model_path}/corr_layer_{l}.npy", corr)
         np.save(f"{model_path}/loadings_layer_{l}.npy", loadings)
         np.save(f"{model_path}/dictionary_layer_{l}.npy", dictionary)
+
+        if not has_modes:
+            print(f"Camada {l + 1}: nenhum modo vivo, o SAE colapsou (treine de novo, use threshold menor ou rede mais larga)")
+            corrs.append(None)
+            continue
+
         corrs.append(corr)
 
         for d in range(10):
@@ -137,27 +143,27 @@ def correlation_results(digits: np.ndarray, model_path: str, datas: list, device
 
 def visualization(visualizer: Visualization, model: nn.Module, scope: bscope.Scope, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray, datas: list, loadings_all: list, dicts: list, corrs: list, label: int, device: str):
     with torch.no_grad():
-        preds = model(test_dataset_x.unsqueeze(1).to(device)).argmax(1).cpu().numpy()
+        preds = model(test_dataset_x.to(device)).argmax(1).cpu().numpy()
 
     sizes = [data.shape[1] for data in datas] + [10]
 
-    visualizer.visualize_all(sizes=sizes, X=test_dataset_x.numpy(), y=test_dataset_y, preds=preds, contribs=scope.log_contributions, dictionaries=dicts, corrs=corrs, label=label)
+    visualizer.visualize_all(sizes=sizes, X=test_dataset_x.squeeze(1).numpy(), y=test_dataset_y, preds=preds, contribs=scope.log_contributions, dictionaries=dicts, corrs=corrs, label=label)
 
 
-def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", label_visualize=7):
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", label_visualize=7, layer_names=None, reduction=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model = setup_model(model_type=model_type, device=device)
 
     model.load_state_dict(torch.load(f"{model_path}/model.pt", map_location=device))
 
-    layers = [model.network[0], model.network[2]]
+    layers, reduction = setup_layers(model=model, model_type=model_type, layer_names=layer_names, reduction=reduction)
 
     _, test_dataloader = setup_dataset(dataset_type=dataset_type)
 
-    test_dataset_x, test_dataset_y = test_dataloader.dataset.data.float() / 255, test_dataloader.dataset.targets.numpy()
+    test_dataset_x, test_dataset_y = setup_test_data(test_dataloader)
 
-    scope, digits = compute_contributions(model=model, layers=layers, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y)
+    scope, digits = compute_contributions(model=model, layers=layers, reduction=reduction, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y)
 
     datas = compute_neural_correlations(scope=scope, layers=layers, device=device, model_path=model_path)
 

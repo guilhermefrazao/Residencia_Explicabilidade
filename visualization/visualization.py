@@ -2,14 +2,7 @@ import os
 import numpy as np
 import matplotlib
 
-# Usa janela interativa quando existe display (Tk); senão cai para Agg (só salva PNGs)
-try:
-    if not os.environ.get("DISPLAY"):
-        raise RuntimeError("sem display")
-    import tkinter  # noqa: F401
-    matplotlib.use("TkAgg")
-except Exception:
-    matplotlib.use("Agg")
+matplotlib.use("Agg")  # só salva PNGs; o Tk só é carregado em show_image, quando uma figura precisa ser mostrada
 
 import matplotlib.pyplot as plt
 
@@ -29,6 +22,23 @@ GRAY, LINE, BLUE, RED, CREAM = "#eee8d5", "#93a1a1", "#268bd2", "#dc322f", "#fdf
 DIVERGING = LinearSegmentedColormap.from_list("solarized_div", [RED, CREAM, BLUE]) 
 POSITIVE = LinearSegmentedColormap.from_list("solarized_pos", [GRAY, BLUE])
 NEGATIVE = LinearSegmentedColormap.from_list("solarized_neg", [GRAY, RED])  
+
+
+def show_image(path: str):
+    try:
+        plt.switch_backend("TkAgg")
+    except Exception:
+        return  # sem display ou sem Tk: fica só o PNG salvo
+
+    image = plt.imread(path)
+
+    plt.figure(figsize=(12, 12 * image.shape[0] / image.shape[1]), layout="constrained")
+    plt.imshow(image)
+    plt.axis("off")
+    plt.show()
+
+    plt.close("all")
+    plt.switch_backend("Agg")
 
 
 def add_colorbar(fig: Figure, axes: np.ndarray, cmap: Colormap, lo: float, hi: float, label: str):
@@ -101,8 +111,25 @@ def draw_bars(ax: Axes, v: np.ndarray, lim: float):
     ax.tick_params(labelsize=6)
 
 
-def with_total(maps: np.ndarray):
-    return np.concatenate([maps, maps.sum(1, keepdims=True)], axis=1)  # última coluna = soma dos mapas de todos os modos
+MAX_MODES, MAX_LABELS = 40, 10
+
+
+def select_modes(positive: np.ndarray, negative: np.ndarray):
+    n_modes = positive.shape[1]
+
+    if n_modes <= MAX_MODES:
+        return np.arange(n_modes)
+
+    # mais de MAX_MODES modos: mantém os de maior contribuição total (positiva + |negativa|), na ordem original; negative vem com sinal (<= 0)
+    total = (positive - negative).sum(axis=(0, 2, 3))
+
+    return np.sort(np.argsort(-total)[:MAX_MODES])
+
+
+def show_modes(maps: np.ndarray, modes: np.ndarray):
+    maps = np.concatenate([maps[:MAX_LABELS], maps[:MAX_LABELS].sum(1, keepdims=True)], axis=1)  # no máximo MAX_LABELS linhas; última coluna = soma de TODOS os modos (antes do corte)
+
+    return maps[:, [*modes, maps.shape[1] - 1]]
 
 
 def class_scales(*maps: np.ndarray):
@@ -125,13 +152,12 @@ class Visualization:
         path = os.path.join(self.out, name)
 
         fig.savefig(path, dpi=130)
-
-        if show:
-            plt.show()
-
         plt.close(fig)
 
         print(f"figura salva em {path}")
+
+        if show:
+            show_image(path)
 
 
     def plot_neuron_contributions(self, contribs: list, X: np.ndarray, y: np.ndarray, preds: np.ndarray, sizes: list, n_images: int = 3):
@@ -214,7 +240,7 @@ class Visualization:
             self.plot_mode_weights(dictionary, corr, l, label)
 
 
-    def plot_class_grid(self, panels: np.ndarray, layer: int, title: str, filename: str):
+    def plot_class_grid(self, panels: np.ndarray, layer: int, title: str, filename: str, modes: np.ndarray):
         n_digits, n_cols = panels.shape[:2]
 
         fig, axes = plt.subplots(n_digits, n_cols, figsize=(0.9 * n_cols, 0.9 * n_digits + 1), squeeze=False, layout="constrained")
@@ -228,29 +254,29 @@ class Visualization:
             row[0].set_ylabel(f"{digit}")
 
         for k, ax in enumerate(axes[0]):
-            ax.set_title("soma" if k == n_cols - 1 else f"{k}", fontsize=7)
+            ax.set_title("soma" if k == n_cols - 1 else f"{modes[k]}", fontsize=7)
 
         fig.suptitle(f"Camada {layer + 1}: {title}", fontsize=10)
 
         self.save_figure(fig, filename)
 
-    def plot_class_mode_maps(self, maps: np.ndarray, layer: int, name: str, cmap: Colormap):
+    def plot_class_mode_maps(self, maps: np.ndarray, layer: int, name: str, cmap: Colormap, modes: np.ndarray):
         # maps = expanded_contributions.class_mode_maps: [dígitos, modos, H, W], média das imagens acertadas de cada dígito (gradiente × entrada ponderado pelos átomos)
-        maps = with_total(maps)
+        maps = show_modes(maps, modes)
         panels = cmap(maps / class_scales(maps))[..., :3]
 
-        self.plot_class_grid(panels, layer, f"contribuições {name} (magnitude) médias por dígito (linhas) e modo (colunas) | escala por dígito (soma tem escala própria)", f"5_mapas_{name}_por_digito_camada{layer + 1}.png")
+        self.plot_class_grid(panels, layer, f"contribuições {name} (magnitude) médias por dígito (linhas) e modo (colunas) | escala por dígito (soma tem escala própria)", f"5_mapas_{name}_por_digito_camada{layer + 1}.png", modes)
 
-    def plot_class_mode_maps_joint(self, positive: np.ndarray, negative: np.ndarray, layer: int):
+    def plot_class_mode_maps_joint(self, positive: np.ndarray, negative: np.ndarray, layer: int, modes: np.ndarray):
         # positive e negative = expanded_contributions.class_mode_maps, [dígitos, modos, H, W]; negative passado em magnitude (-negative)
-        positive, negative = with_total(positive), with_total(negative)
+        positive, negative = show_modes(positive, modes), show_modes(negative, modes)
         scales = class_scales(positive, negative)
 
         # pintura subtrativa sobre o fundo: positivo tinge de azul, negativo de vermelho; pixels com os dois ficam escuros (sem cancelamento)
         base, blue, red = (np.array(to_rgb(c)) for c in (CREAM, BLUE, RED))
         panels = base - (positive / scales)[..., None] * (base - blue) - (negative / scales)[..., None] * (base - red)
 
-        self.plot_class_grid(np.clip(panels, 0, 1), layer, "contribuições positivas (azul) e negativas (vermelho) médias por dígito (linhas) e modo (colunas) | mesma escala para as duas (soma tem escala própria)", f"5_mapas_conjuntos_por_digito_camada{layer + 1}.png")
+        self.plot_class_grid(np.clip(panels, 0, 1), layer, "contribuições positivas (azul) e negativas (vermelho) médias por dígito (linhas) e modo (colunas) | mesma escala para as duas (soma tem escala própria)", f"5_mapas_conjuntos_por_digito_camada{layer + 1}.png", modes)
 
     def plot_label_images(self, images: np.ndarray, modes: np.ndarray, label: int, layer: int, n_cols: int = 10):
         # images = imagens de teste do dígito (dataset.data); modes = modo de maior loading de cada imagem (loadings_layer_{l}.npy, argmax)
@@ -268,3 +294,29 @@ class Visualization:
         fig.suptitle(f"Dígito {label}: {len(images)} imagens do teste, ordenadas pelo modo dominante da camada {layer + 1}", fontsize=10)
 
         self.save_figure(fig, f"5_imagens_do_digito_{label}_camada{layer + 1}.png")
+
+    def plot_ablation(self, results: dict, label: int, fractions: np.ndarray):
+        # results = patching.neural_ablation.sweep: {método: métricas por fração de neurônios removidos em cada camada}; "random" = média dos sorteios de neurônios mantidos
+        curves = {
+            "acc_label": (f"acurácia só do dígito {label}", BLUE, "-"),
+            "acc_others": ("acurácia dos outros dígitos", RED, "-"),
+            "acc_all": ("acurácia de todas as imagens", LINE, "-"),
+            "frac_pred_label": (f"fração prevista como {label}", "#b58900", "--"),
+        }
+        titles = {"sae": "mantém os neurônios de maior score do SAE", "ig": "baseline sem SAE: maior contribuição média do IG", "random": "controle: mantém neurônios ao acaso"}
+
+        fig, axes = plt.subplots(1, len(results), figsize=(6 * len(results), 4.5), sharey=True, squeeze=False, layout="constrained")
+
+        for ax, (name, result) in zip(axes[0], results.items()):
+            for metric, (text, color, style) in curves.items():
+                ax.plot(fractions * 100, result[metric] * 100, style, color=color, marker="o", ms=3, label=text)
+
+            ax.set_title(titles.get(name, name), fontsize=10)
+            ax.set_xlabel("% de neurônios removidos em cada camada")
+
+        axes[0, 0].set_ylabel("%")
+        axes[0, 0].legend(fontsize=8)
+
+        fig.suptitle(f"Ablação por zero (activation patching) para o dígito {label}", fontsize=11)
+
+        self.save_figure(fig, f"8_ablacao_digito{label}.png")

@@ -1,8 +1,8 @@
 import numpy as np, torch
 
 from torch import nn
-from setup import setup_model, setup_dataset
-from visualization.visualization import Visualization, POSITIVE, NEGATIVE
+from setup import setup_model, setup_layers, setup_dataset, setup_test_data
+from visualization.visualization import Visualization, POSITIVE, NEGATIVE, select_modes
 
 
 def predict(model: nn.Module, x: torch.Tensor, device: str):
@@ -10,25 +10,37 @@ def predict(model: nn.Module, x: torch.Tensor, device: str):
         return model(x.to(device)).argmax(1).cpu().numpy()
 
 
-def mode_maps(model: nn.Module, images: torch.Tensor, atoms: np.ndarray, layer: int, device: str):
+def mode_maps(model: nn.Module, images: torch.Tensor, atoms: np.ndarray, layer: nn.Module, device: str):
     images = images.to(device).clone().requires_grad_()
-    h = model.network[: 2 * layer + 1](model.flatten(images))
-    probs = torch.softmax(model.network[2 * layer + 1:](h), dim=-1)
 
+    captured = []
+    handle = layer.register_forward_hook(lambda module, inputs, output: captured.append(output))
+    probs = torch.softmax(model(images), dim=-1)
+    handle.remove()
+
+    h = captured[0]  # saída da camada: [n, C] (Linear) ou [n, C, H, W] (Conv); cada unidade = um (canal, posição)
     dy_dh, = torch.autograd.grad(probs.max(1).values.sum(), h, retain_graph=True)
-    dh_dx = torch.stack([torch.autograd.grad(h[:, j].sum(), images, retain_graph=True)[0] for j in range(h.shape[1])], dim=1)
+    dy_dh, units = dy_dh.flatten(1), h.flatten(1)
 
-    neuron_maps = images.detach()[:, None] * dh_dx * dy_dh[:, :, None, None]
     atoms = torch.as_tensor(atoms, dtype=h.dtype, device=device)
-    terms = [atom[None, :, None, None] * neuron_maps for atom in atoms]
+    channels = torch.arange(units.shape[1], device=device) // (units.shape[1] // h.shape[1])
 
-    positive = torch.stack([term.clamp(min=0).sum(1) for term in terms], dim=1)
-    negative = torch.stack([term.clamp(max=0).sum(1) for term in terms], dim=1)
+    positive = torch.zeros(len(atoms), *images.shape, device=device)
+    negative = torch.zeros(len(atoms), *images.shape, device=device)
 
-    return positive.cpu().numpy(), negative.cpu().numpy()
+    for unit in range(units.shape[1]):
+        dh_dx, = torch.autograd.grad(units[:, unit].sum(), images, retain_graph=True)
+
+        unit_map = images.detach() * dh_dx * dy_dh[:, unit, None, None, None]
+        terms = atoms[:, channels[unit]].view(-1, 1, 1, 1, 1) * unit_map[None]
+
+        positive += terms.clamp(min=0)
+        negative += terms.clamp(max=0)
+
+    return positive.transpose(0, 1).mean(2).cpu().numpy(), negative.transpose(0, 1).mean(2).cpu().numpy()
 
 
-def class_mode_maps(model: nn.Module, x: torch.Tensor, y: np.ndarray, preds: np.ndarray, atoms: np.ndarray, layer: int, device: str, n_images: int = 100):
+def class_mode_maps(model: nn.Module, x: torch.Tensor, y: np.ndarray, preds: np.ndarray, atoms: np.ndarray, layer: nn.Module, device: str, n_images: int = 100):
     positives, negatives = [], []
 
     for digit in range(10):
@@ -41,29 +53,39 @@ def class_mode_maps(model: nn.Module, x: torch.Tensor, y: np.ndarray, preds: np.
     return np.stack(positives), np.stack(negatives)
 
 
-def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP"):
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", layer_names=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = setup_model(model_type=model_type, device=device)
+    model = setup_model(model_type=model_type, device=device).eval()
 
     model.load_state_dict(torch.load(f"{model_path}/model.pt", map_location=device))
 
+    layers, _ = setup_layers(model=model, model_type=model_type, layer_names=layer_names)
+
     _, test_dataloader = setup_dataset(dataset_type=dataset_type)
 
-    test_dataset_x, test_dataset_y = test_dataloader.dataset.data.float() / 255, test_dataloader.dataset.targets.numpy()
+    test_dataset_x, test_dataset_y = setup_test_data(test_dataloader)
 
     preds = predict(model, test_dataset_x, device)
 
     visualizer = Visualization(dataset=dataset_type, network=model_type)
 
-    for layer in range(2):
-        atoms = np.load(f"{model_path}/dictionary_layer_{layer}.npy")
+    for index, layer in enumerate(layers):
+        atoms = np.load(f"{model_path}/dictionary_layer_{index}.npy")
+
+        if len(atoms) == 0:
+            continue
 
         positive, negative = class_mode_maps(model, test_dataset_x, test_dataset_y, preds, atoms, layer, device)
 
-        visualizer.plot_class_mode_maps(positive, layer, "positivas", POSITIVE)
-        visualizer.plot_class_mode_maps(-negative, layer, "negativas", NEGATIVE)
-        visualizer.plot_class_mode_maps_joint(positive, -negative, layer)
+        modes = select_modes(positive, negative)
+
+        if len(modes) < len(atoms):
+            print(f"Camada {index + 1}: {len(atoms)} modos, mostrando os {len(modes)} de maior contribuição")
+
+        visualizer.plot_class_mode_maps(positive, index, "positivas", POSITIVE, modes)
+        visualizer.plot_class_mode_maps(-negative, index, "negativas", NEGATIVE, modes)
+        visualizer.plot_class_mode_maps_joint(positive, -negative, index, modes)
 
 
 if __name__ == "__main__":
