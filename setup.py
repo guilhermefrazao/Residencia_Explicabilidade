@@ -5,14 +5,16 @@ import torch.optim as optim
 import wandb
 import glob, io
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 
 from PIL import Image
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from functools import cached_property
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import transforms
-from networks import ConvolutionalNeuralNetwork, MultilayerPerceptron, ResNet50, DQN
+from networks import ConvolutionalNeuralNetwork, MultilayerPerceptron, ResNet50, Autoencoder, DQN
 
 
 class ParquetImageDataset(Dataset):
@@ -24,6 +26,10 @@ class ParquetImageDataset(Dataset):
     def __len__(self):
         return int(self.offsets[-1])
 
+    @property
+    def targets(self):
+        return np.concatenate([table["label"].to_numpy() for table in self.tables])
+
     def __getitem__(self, index: int):
         shard = np.searchsorted(self.offsets, index, side="right") - 1
         row = self.tables[shard].slice(index - self.offsets[shard], 1).to_pylist()[0]
@@ -32,81 +38,177 @@ class ParquetImageDataset(Dataset):
 
 
 
+IMAGENET_MEAN, IMAGENET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+MAX_TEST_IMAGES = 1000
+
 LAYER_CONFIG = {
     "MLP": {"layers": ["network.0", "network.2"], "reduction": ["ei_split"]},
-    "Convolutional": {"layers": ["conv1", "conv2", "fc1", "fc2"], "reduction": ["ei_split"]},
-    "ResNet50": {"layers": ["layer1", "layer2", "layer3", "layer4"], "reduction": ["ei_split"]},
+    "Convolutional": {"layers": ["conv1", "conv2", "fc1", "fc2"], "reduction": ["ei_split", "spatial_sum"]},
+    "ResNet50": {"layers": ["layer1", "layer2", "layer3", "layer4"], "reduction": ["ei_split", "spatial_sum"]},
 }
 
 
-def setup_dataset(dataset_type: str="Mnist"):
-    if dataset_type == "Mnist":
-        transform = transforms.ToTensor()
+def dataset_class_names(dataset_type: str):
+    if dataset_type == "Imagenet":
+        return torchvision.models.ResNet50_Weights.IMAGENET1K_V1.meta["categories"]
 
-        train_data, test_data = torchvision.datasets.MNIST("datasets", train=True, download=True, transform=transform), torchvision.datasets.MNIST("datasets", train=False, download=False, transform=transform)
-
-        return DataLoader(train_data, batch_size=64, num_workers=4, pin_memory=True, shuffle=True), DataLoader(test_data, batch_size=64, num_workers=4, pin_memory=True, shuffle=True)
-    elif dataset_type == "Imagenet":
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-        train_transform = transforms.Compose([transforms.RandomResizedCrop(224), transforms.RandomHorizontalFlip(), transforms.ToTensor(), normalize])
-        test_transform = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(), normalize])
-
-        train_data, test_data = ParquetImageDataset("datasets/Imagenet/data/train-*.parquet", transform=train_transform), ParquetImageDataset("datasets/Imagenet/data/validation-*.parquet", transform=test_transform)
-
-        return DataLoader(train_data, batch_size=64, num_workers=8, pin_memory=True, shuffle=True), DataLoader(test_data, batch_size=64, num_workers=8, pin_memory=True, shuffle=False)
-    else:
-        pass
+    return [str(digit) for digit in range(10)]
 
 
-def setup_test_data(test_dataloader: DataLoader):
-    dataset = test_dataloader.dataset
+def class_ids(dataset_type: str, classes):
+    names = dataset_class_names(dataset_type)
 
-    return dataset.data.float().unsqueeze(1) / 255, dataset.targets.numpy()
-
-
-
-def setup_model(model_type: str="MLP", device: str="cuda", **model_kwargs):
-    if model_type == "Convolutional":
-        return ConvolutionalNeuralNetwork().to(device)
-
-    elif model_type == "MLP":
-        return MultilayerPerceptron().to(device)
-
-    elif model_type == "ResNet50":
-        return ResNet50().to(device)
-
-    else:
-        pass
+    return [int(c) if str(c).isdigit() else names.index(c) for c in ([classes] if isinstance(classes, (str, int)) else classes)]
 
 
-def setup_layers(model: nn.Module, model_type: str, layer_names: list=None, reduction: list=None):
-    config = LAYER_CONFIG[model_type]
+class Setup:
+    def __init__(self, dataset_type: str="Mnist", model_type: str="MLP", loss_type: str="CrossEntropy", optimizer_type: str="Adam", learning_rate: float=0.001, layer_names: list=None, reduction: list=None, classes: list=None, render: bool=False):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.dataset_type, self.model_type, self.optimizer_type, self.learning_rate = dataset_type, model_type, optimizer_type, learning_rate
+        self.classes = None if classes is None else np.sort(class_ids(dataset_type, classes))
+        self.model_kwargs = {}
+        self.environment, self.train_dataloader, self.test_dataloader, self.class_names = None, None, None, None
 
-    layers = [model.get_submodule(name) for name in layer_names or config["layers"]]
+        if dataset_type in ("Mnist", "Imagenet"):
+            self.train_dataloader, self.test_dataloader = self.create_dataloaders()
+        else:
+            self.environment = gym.make(dataset_type, render_mode="human" if render else None)
+            self.model_kwargs = {"n_observations": len(self.environment.reset()[0]), "n_actions": self.environment.action_space.n}
 
-    return layers, reduction or config["reduction"]
+        self.model = self.create_model()
+        self.criterion = self.create_loss(loss_type)
+        self.optimizer = self.create_optimizer(self.model, optimizer_type, learning_rate)
 
+        if model_type in LAYER_CONFIG:
+            self.layers = [self.model.get_submodule(name) for name in layer_names or LAYER_CONFIG[model_type]["layers"]]
+            self.reduction = reduction or LAYER_CONFIG[model_type]["reduction"]
 
-def setup_loss_type(loss_type="CrossEntropy"):
-    if loss_type == "CrossEntropy":
-        return nn.CrossEntropyLoss()
-    elif loss_type == "SmoothL1":
-        return nn.SmoothL1Loss()
-    else:
-        pass
-
-
-def setup_optimizer(model: nn.Module, optimizer_type: str= "Adam", learning_rate: float= 0.001):
-    if optimizer_type == "Adam":
-        return optim.Adam(model.parameters(), lr=learning_rate)
-    elif optimizer_type == "SGD":
-        return optim.SGD(model.parameters(), lr=learning_rate)
-    elif optimizer_type == "AdamW":
-        return optim.AdamW(model.parameters(), lr=learning_rate, amsgrad=True)
-    else:
-        pass
+        self._test_data = {}
 
 
-def setup_wandb(run_name: str, config=None):
-    return wandb.init(entity="ResidenciaIA", project="Explicabilidade_Repo", name=run_name, dir="runs/", config=config)
+    def create_dataloaders(self):
+        return self.create_dataloader(train=True), self.create_dataloader(train=False)
+
+
+    def create_dataloader(self, train: bool):
+        if self.dataset_type == "Mnist":
+            data = torchvision.datasets.MNIST("datasets", train=train, download=train, transform=transforms.ToTensor())
+
+            return DataLoader(data, batch_size=64, num_workers=2, pin_memory=True, shuffle=train, persistent_workers=True)
+
+        elif self.dataset_type == "Imagenet":
+            normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+
+            if train:
+                transform = transforms.Compose([transforms.RandomResizedCrop(224), transforms.RandomHorizontalFlip(), transforms.ToTensor(), normalize])
+            else:
+                transform = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(), normalize])
+
+            data = ParquetImageDataset(f"datasets/Imagenet/data/{'train' if train else 'validation'}-*.parquet", transform=transform)
+
+            return DataLoader(data, batch_size=64, num_workers=2, pin_memory=True, shuffle=train, persistent_workers=True, prefetch_factor=4)
+
+
+    def create_class_names(self):
+        names = dataset_class_names(self.dataset_type)
+
+        return [names[c] for c in (range(len(names)) if self.classes is None else self.classes)]
+
+
+    @staticmethod
+    def balanced_indices(targets: np.ndarray, per_class: int):
+        order = np.argsort(targets, kind="stable")
+        rank = np.arange(len(order)) - np.searchsorted(targets[order], targets[order])
+
+        return np.sort(order[rank < per_class])
+
+
+    def extract_test_data(self, only_labels: bool):
+        loader = self.test_dataloader if self.test_dataloader is not None else self.create_dataloader(train=False)
+        dataset = loader.dataset
+
+        targets = np.asarray(dataset.targets)
+
+        if only_labels:
+            classes = self.classes
+            indices = np.flatnonzero(np.isin(targets, classes))[:MAX_TEST_IMAGES]
+        else:
+            classes = np.unique(targets)
+            indices = self.balanced_indices(targets, max(1, MAX_TEST_IMAGES // len(classes)))
+
+        xs, ys = zip(*DataLoader(Subset(dataset, indices), batch_size=64, num_workers=4, shuffle=False))
+
+        return torch.cat(xs), np.searchsorted(classes, torch.cat(ys).numpy())
+
+
+    def test_data(self, only_labels: bool = False):
+        only_labels = only_labels and self.classes is not None
+
+        if only_labels not in self._test_data:
+            self._test_data[only_labels] = self.extract_test_data(only_labels)
+
+            self.train_dataloader = self.test_dataloader = None
+            pa.default_memory_pool().release_unused()
+
+        return self._test_data[only_labels]
+
+
+    @staticmethod
+    def display_images(x: torch.Tensor):
+        if x.shape[1] == 1:
+            return x.squeeze(1).numpy()
+
+        mean, std = (torch.tensor(v).view(1, 3, 1, 1) for v in (IMAGENET_MEAN, IMAGENET_STD))
+
+        return (x * std + mean).clamp(0, 1).permute(0, 2, 3, 1).numpy()
+
+
+    def create_model(self):
+        if self.model_type == "Convolutional":
+            return ConvolutionalNeuralNetwork().to(self.device)
+
+        elif self.model_type == "MLP":
+            return MultilayerPerceptron().to(self.device)
+
+        elif self.model_type == "ResNet50":
+            return ResNet50().to(self.device)
+
+        elif self.model_type == "Autoencoder":
+            return Autoencoder().to(self.device)
+
+        elif self.model_type == "DQN":
+            return DQN(**self.model_kwargs).to(self.device)
+
+
+    def load_checkpoint(self, path: str):
+        self.model.load_state_dict(torch.load(f"{path}/model.pt", map_location=self.device))
+
+        return self.model.eval()
+
+
+    def create_loss(self, loss_type: str="CrossEntropy"):
+        if loss_type == "CrossEntropy":
+            return nn.CrossEntropyLoss()
+        elif loss_type == "SmoothL1":
+            return nn.SmoothL1Loss()
+        elif loss_type == "MSE":
+            return nn.MSELoss()
+
+
+    def create_optimizer(self, model: nn.Module, optimizer_type: str="Adam", learning_rate: float=0.001):
+        if optimizer_type == "Adam":
+            return optim.Adam(model.parameters(), lr=learning_rate)
+        elif optimizer_type == "SGD":
+            return optim.SGD(model.parameters(), lr=learning_rate)
+        elif optimizer_type == "AdamW":
+            return optim.AdamW(model.parameters(), lr=learning_rate, amsgrad=True)
+
+
+    @cached_property
+    def visualizer(self):
+        from visualization.visualization import Visualization
+
+        return Visualization(dataset=self.dataset_type, network=self.model_type, class_names=self.class_names)
+
+    def init_wandb(self, run_name: str, config=None):
+        return wandb.init(entity="ResidenciaIA", project="Explicabilidade_Repo", name=run_name, dir="runs/", config=config)

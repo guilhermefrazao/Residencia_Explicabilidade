@@ -10,7 +10,28 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "subProcess": false,
+            "justMyCode": true
+        },
+        {
+        "name": "plot_netorks_weights",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "visualization.plot_netorks_weights",
+        "cwd": "${workspaceFolder}",
+        "args": ["--classes", "violin", "--ig_batch_size", "32"],
+        "justMyCode": true,
+        "subProcess": false
+        },
+        {
+        "name": "Training",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "train",
+        "cwd": "${workspaceFolder}",
+        "justMyCode": true,
+        "subProcess": false
         }
     ]
 }

@@ -5,58 +5,34 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from tqdm import tqdm
 from torch import nn
-from setup import setup_model, setup_layers, setup_dataset, setup_test_data, setup_optimizer, setup_wandb
+from setup import Setup, dataset_class_names
+from contribution.utils import spatial_sum, predict
 from visualization.visualization import Visualization
 
 
-def compute_contributions(model: nn.Module, layers: list, reduction: list, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray):
+def ig_contributions(model: nn.Module, layers: list, reduction: list, test_dataset_x: torch.Tensor, batch_size: int = 64):
     scope = bscope.Scope(model, layers, to_numpy=True)
-    scope.use_int_grad(steps=20)
+    scope.use_int_grad(steps=10)
     scope.wrt_topk(k=1, softmax=True)
     scope.log_start(reduction=reduction)
 
-    for xb in tqdm(test_dataset_x.split(128)):
+    for xb in tqdm(test_dataset_x.split(batch_size)):
         scope(xb)
 
     scope.log_stop()
+    scope.inspector.remove_hooks()
 
-    # camadas convolucionais ficam [N, 2C, H, W] (ei_split já separou positivo/negativo por posição); soma o espaço para virar [N, 2C], como nas camadas fc
-    scope.log_contributions = [c.sum(axis=(2, 3)) if c.ndim == 4 else c for c in scope.log_contributions]
+    scope.log_contributions = [spatial_sum(c) for c in scope.log_contributions] 
 
-    digits = np.eye(10)[test_dataset_y]
-
-    return scope, digits
+    return scope
 
 
-def mode_pixel_maps(model: nn.Module, test_dataset_x_five_images: torch.Tensor, atoms: np.ndarray, layer: int, device: str):
-    test_dataset_x_five_images = test_dataset_x_five_images.to(device).clone().requires_grad_()
-
-    h = model.network[: 2 * layer + 1](model.flatten(test_dataset_x_five_images))
-    print(f"h: {h}", f"Dim: {h.shape} \n")
-
-    logits = model.network[2 * layer + 1:](h)
-
-    probs = torch.softmax(logits, dim=-1)
-
-    top_prob = probs.max(1).values
-
-    dy_dh, = torch.autograd.grad(top_prob.sum(), h, retain_graph=True) 
-    print(f"dy_dh: {dy_dh}", f"Dim: {dy_dh.shape} \n")
-
-    atoms = torch.as_tensor(atoms, dtype=h.dtype, device=device)
-    print(f"Atoms: {atoms}", f"Dim: {atoms.shape} \n")
-
-    maps = [test_dataset_x_five_images * torch.autograd.grad(h, test_dataset_x_five_images, grad_outputs=atom * dy_dh, retain_graph=True)[0] for atom in atoms]
-    print(f"maps: {maps}", f"Dim: {maps.shape} \n")
-    maps = torch.stack(maps, dim=1)
-
-    return maps.detach().cpu().numpy()
-
-
-def compute_neural_correlations(scope: bscope.Scope, layers: list, device: str, model_path: str):
+def sae_contributions(setup: Setup, scope: bscope.Scope, model_path: str):
     datas = []
 
-    for l in range(len(layers)):
+    device = setup.device
+
+    for l in range(len(setup.layers)):
         c = scope.log_contributions[l]
 
         data = c[:, c.shape[1] // 2:]
@@ -71,15 +47,13 @@ def compute_neural_correlations(scope: bscope.Scope, layers: list, device: str, 
         global_step = 0
         l1_regularization = 5e-5
 
-        print(f"cont {contributions_dim}")
-
         sae = NNSTSAE(data_dim=contributions_dim, num_atoms=3 * contributions_dim, threshold=theashold, mlp_hidden_dim=contributions_dim).to(device)
 
-        optimizer = setup_optimizer(model=sae, optimizer_type="Adam", learning_rate=lr)
+        optimizer = setup.create_optimizer(sae, "Adam", lr)
 
         date = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
-        wandb_run = setup_wandb(f"Sparse_Autoencoders_{l}_{date.strftime('%d/%m/%Y - %H:%M')}", config={"sae/train/n_epochs": n_epochs, "sae/train/input_dim": contributions_dim, "sae/train/theashold": theashold, "sae/train/learning_rate": lr, "sae/train/batch_size": batch_size})
+        wandb_run = setup.init_wandb(f"Sparse_Autoencoders_{l}_{date.strftime('%d/%m/%Y - %H:%M')}", config={"sae/train/n_epochs": n_epochs, "sae/train/input_dim": contributions_dim, "sae/train/theashold": theashold, "sae/train/learning_rate": lr, "sae/train/batch_size": batch_size})
 
         progress_bar = tqdm(range(n_epochs), desc=f"{type(sae).__name__} - camada {l + 1}", position=0, leave=True)
 
@@ -133,43 +107,42 @@ def correlation_results(digits: np.ndarray, model_path: str, datas: list, device
 
         corrs.append(corr)
 
-        for d in range(10):
+        for d in range(corr.shape[0]):
             k = corr[d].argmax()
-            print(f"  digito {d}: modo {k} (corr {corr[d, k]:.2f}) | neuronios que mais pesam: {np.argsort(-np.abs(dictionary[k]))[:7]}")
+            print(f"Posição Dataset de Teste {d}: modo {k} (corr {corr[d, k]:.2f}) | neuronios que mais pesam: {np.argsort(-np.abs(dictionary[k]))[:7]}")
 
 
     return loadings_all, dicts, corrs
 
 
-def visualization(visualizer: Visualization, model: nn.Module, scope: bscope.Scope, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray, datas: list, loadings_all: list, dicts: list, corrs: list, label: int, device: str):
-    with torch.no_grad():
-        preds = model(test_dataset_x.to(device)).argmax(1).cpu().numpy()
+def visualization(visualizer: Visualization, model: nn.Module, scope: bscope.Scope, test_dataset_x: torch.Tensor, test_dataset_y: np.ndarray, datas: list, loadings_all: list, dicts: list, corrs: list, classes: list[int], device: str):
+    preds = predict(model, test_dataset_x, device)  # o teste cobre todas as classes: y e preds são o próprio id do dataset
 
-    sizes = [data.shape[1] for data in datas] + [10]
+    sizes = [data.shape[1] for data in datas] + [test_dataset_y.max() + 1]
 
-    visualizer.visualize_all(sizes=sizes, X=test_dataset_x.squeeze(1).numpy(), y=test_dataset_y, preds=preds, contribs=scope.log_contributions, dictionaries=dicts, corrs=corrs, label=label)
+    labels = range(sizes[-1]) if classes is None else classes  # classes (ids) cujos modos são plotados
+
+    visualizer.visualize_all(sizes=sizes, X=Setup.display_images(test_dataset_x), y=test_dataset_y, preds=preds, contribs=scope.log_contributions, dictionaries=dicts, corrs=corrs, labels=labels, n_images=2)
 
 
-def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", label_visualize=7, layer_names=None, reduction=None):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", layer_names=None, reduction=None, classes=None, batch_size=64, setup: Setup=None):
+    setup = setup or Setup(dataset_type=dataset_type, model_type=model_type, layer_names=layer_names, reduction=reduction, classes=classes)
 
-    model = setup_model(model_type=model_type, device=device)
+    model = setup.load_checkpoint(model_path)
 
-    model.load_state_dict(torch.load(f"{model_path}/model.pt", map_location=device))
+    if setup.dataset_type in ("Mnist", "Imagenet"):
+        test_dataset_x, test_dataset_y = setup.test_data()
+        digits = np.eye(test_dataset_y.max() + 1)[test_dataset_y]
 
-    layers, reduction = setup_layers(model=model, model_type=model_type, layer_names=layer_names, reduction=reduction)
+    scope = ig_contributions(model=model, layers=setup.layers, reduction=setup.reduction, test_dataset_x=test_dataset_x, batch_size=batch_size)
 
-    _, test_dataloader = setup_dataset(dataset_type=dataset_type)
+    datas = sae_contributions(setup=setup, scope=scope, model_path=model_path)
 
-    test_dataset_x, test_dataset_y = setup_test_data(test_dataloader)
+    loadings_all, dicts, corrs = correlation_results(digits=digits, model_path=model_path, datas=datas, device=setup.device)
 
-    scope, digits = compute_contributions(model=model, layers=layers, reduction=reduction, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y)
+    setup.visualizer.class_names = dataset_class_names(setup.dataset_type)  # os rótulos aqui são ids: nomes indexados por id
 
-    datas = compute_neural_correlations(scope=scope, layers=layers, device=device, model_path=model_path)
-
-    loadings_all, dicts, corrs = correlation_results(digits=digits, model_path=model_path, datas=datas, device=device)
-
-    visualization(visualizer=Visualization(dataset=dataset_type, network=model_type), model=model, scope=scope, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y, datas=datas, loadings_all=loadings_all, dicts=dicts, corrs=corrs, label=label_visualize, device=device)
+    visualization(visualizer=setup.visualizer, model=model, scope=scope, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y, datas=datas, loadings_all=loadings_all, dicts=dicts, corrs=corrs, classes=setup.classes, device=setup.device)
 
 
 if __name__ == "__main__":
