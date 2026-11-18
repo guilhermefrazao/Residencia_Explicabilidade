@@ -25,6 +25,25 @@ class MultilayerPerceptron(nn.Module):
         return logits
 
 
+class MultilayerPerceptronRegression(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.flatten = nn.Flatten()
+        self.network = nn.Sequential(
+            nn.Linear(28*28, 16), 
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            nn.Linear(16, 10)
+            )
+
+    def forward(self, x):
+        x = self.flatten(x)
+        logits = self.network(x)
+
+        return logits
+
+
 class ConvolutionalNeuralNetwork(nn.Module):
     def __init__(self):
         super().__init__()
@@ -53,9 +72,9 @@ class Bottleneck(nn.Module):
         super().__init__()
         out_channels = channels * self.expansion
 
-        self.conv1 = nn.Conv2d(in_channels, channels, 1, stride=stride, bias=False)
+        self.conv1 = nn.Conv2d(in_channels, channels, 1, bias=False)
         self.bn1 = nn.BatchNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1, bias=False)
+        self.conv2 = nn.Conv2d(channels, channels, 3, stride=stride, padding=1, bias=False)  # stride no 3x3, como no torchvision (ResNet v1.5)
         self.bn2 = nn.BatchNorm2d(channels)
         self.conv3 = nn.Conv2d(channels, out_channels, 1, bias=False)
         self.bn3 = nn.BatchNorm2d(out_channels)
@@ -103,3 +122,65 @@ class ResNet50(nn.Module):
 
         return self.fc(x)
 
+
+class RecurrentNeuralNetwork(nn.Module):
+    def __init__(self, hidden_size: int = 64, num_classes: int = 10):
+        super().__init__()
+        self.rnn = nn.RNN(28, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        outputs, _ = self.rnn(x.squeeze(1))
+
+        return self.fc(outputs[:, -1])
+
+
+class LongShortTermMemory(nn.Module):
+    def __init__(self, hidden_size: int = 64, num_classes: int = 10):
+        super().__init__()
+        self.lstm = nn.LSTM(28, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        outputs, _ = self.lstm(x.squeeze(1))
+
+        return self.fc(outputs[:, -1])
+
+
+class Autoencoder(nn.Module):
+    def __init__(self, latent_size: int = 32):
+        super().__init__()
+        self.encoder = nn.Sequential(nn.Flatten(), nn.Linear(28*28, 128), nn.ReLU(), nn.Linear(128, latent_size))
+        self.decoder = nn.Sequential(nn.Linear(latent_size, 128), nn.ReLU(), nn.Linear(128, 28*28), nn.Sigmoid())
+
+    def forward(self, x):
+        return self.decoder(self.encoder(x)).view_as(x)
+
+
+class Transformer(nn.Module):
+    def __init__(self, d_model: int = 64, n_heads: int = 4, n_layers: int = 2, num_classes: int = 10):
+        super().__init__()
+        self.embedding = nn.Linear(28, d_model)
+        self.position = nn.Parameter(torch.zeros(1, 28, d_model))
+        self.encoder = nn.TransformerEncoder(nn.TransformerEncoderLayer(d_model, n_heads, dim_feedforward=2 * d_model, batch_first=True), n_layers)
+        self.fc = nn.Linear(d_model, num_classes)
+
+    def forward(self, x):
+        x = self.encoder(self.embedding(x.squeeze(1)) + self.position)
+
+        return self.fc(x.mean(dim=1))
+
+
+class DQN(nn.Module):
+
+    def __init__(self, n_observations, n_actions):
+        super(DQN, self).__init__()
+        self.layer1 = nn.Linear(n_observations, 128)
+        self.layer2 = nn.Linear(128, 128)
+        self.layer3 = nn.Linear(128, n_actions)
+
+
+    def forward(self, x):
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        return self.layer3(x)

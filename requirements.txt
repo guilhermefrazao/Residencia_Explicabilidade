@@ -2,3 +2,8 @@ wandb>=0.31
 tqdm>=0.29.2
 scipy>=1.18.1
 ipython>=9.18.1
+gymnasium==1.4.0
+pyarrow>=26.0.1
+pygame-ce==2.5.8
+scikit-learn==1.9.1
+pandas==3.1.1
