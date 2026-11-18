@@ -4,28 +4,20 @@ from contextlib import contextmanager
 from datetime import datetime
 from torch import nn
 from zoneinfo import ZoneInfo
-from setup import setup_model, setup_layers, setup_dataset, setup_test_data, setup_wandb
-from contribution.contributions import compute_contributions
-from contribution.expanded_contributions import predict
-from visualization.visualization import Visualization
+from setup import Setup, dataset_class_names
+from contribution.utils import predict, class_modes
 
 
-def rank_neurons(dictionary: np.ndarray, corr: np.ndarray, label: int):
-    modes = np.where(corr.argmax(0) == label)[0]
+def top_neurons(dictionary: np.ndarray, corr: np.ndarray, label: int, fraction: float = 0.02, n_modes: int = 10):
+    # neurônios a remover: em cada um dos n_modes modos mais correlacionados com a classe (os mesmos dos mapas), os `fraction` de maior |peso| no dicionário; união entre os modos
+    modes = class_modes(corr, [label], n_modes)[0]
+    n_top = max(1, round(fraction * dictionary.shape[1]))
 
-    print(f"modes_correlation: {modes}", f"Label: {label} \n")
+    top = np.argsort(-np.abs(dictionary[modes]), axis=1, kind="stable")[:, :n_top]
 
-    if len(modes) == 0:
-        return None
+    print(f"modes_correlation: {modes}", f"Label: {label} | neurônios removidos: {len(np.unique(top))} de {dictionary.shape[1]} \n")
 
-    return np.argsort(-np.abs(dictionary[modes]).sum(0), kind="stable")
-
-
-def rank_neurons_ig(contribution: np.ndarray, y: np.ndarray, label: int):
-    # contribution = scope.log_contributions[layer], [N, 2C] = [negativa | positiva]; baseline sem SAE: contribuição positiva média do IG nas imagens do dígito
-    positive = contribution[:, contribution.shape[1] // 2:]
-
-    return np.argsort(-positive[y == label].mean(0), kind="stable")
+    return np.unique(top)
 
 
 def channel_mask(output: torch.Tensor, keep: np.ndarray):
@@ -64,29 +56,33 @@ def label_metrics(preds: np.ndarray, y: np.ndarray, label: int):
     }
 
 
-def evaluate(model: nn.Module, x: torch.Tensor, y: np.ndarray, label: int, layers: list, keeps: list, device: str):
+def evaluate(model: nn.Module, x: torch.Tensor, y: np.ndarray, label: int, layers: list, keeps: list, device: str, classes: list = None):
     with ablate(layers, keeps):
-        return label_metrics(predict(model, x, device), y, label)
+        return label_metrics(predict(model, x, device, classes), y, label)
 
 
-def n_kept(order: np.ndarray, fraction_removed: float):
-    return len(order) - round(fraction_removed * len(order))
+def ablated_metrics(model: nn.Module, x: torch.Tensor, y: np.ndarray, label: int, layers: list, removed: list, n_neurons: list, device: str, classes: list = None):
+    # removed[i] = neurônios zerados na camada i; os demais (keep) passam intactos
+    keeps = [np.setdiff1d(np.arange(n), r) for r, n in zip(removed, n_neurons)]
+
+    return evaluate(model, x, y, label, layers, keeps, device, classes)
 
 
-def sweep(model: nn.Module, x: torch.Tensor, y: np.ndarray, label: int, layers: list, orders: dict, fractions: np.ndarray, device: str, n_random: int = 5):
-    # orders = {método: ranking de neurônios por camada}; o controle aleatório entra como "random"
+def random_metrics(model: nn.Module, x: torch.Tensor, y: np.ndarray, label: int, layers: list, removed: list, n_neurons: list, device: str, n_random: int = 5, classes: list = None):
+    # controle: em cada camada remove a mesma quantidade de neurônios que o SAE removeu, mas sorteados; média de n_random sorteios
     rng = np.random.default_rng(0)
-    results = {name: [] for name in [*orders, "random"]}
-    reference = next(iter(orders.values()))
 
-    for fraction in fractions:
-        for name, ranking in orders.items():
-            results[name].append(evaluate(model, x, y, label, layers, [order[: n_kept(order, fraction)] for order in ranking], device))
+    runs = [ablated_metrics(model, x, y, label, layers, [rng.choice(n, len(r), replace=False) for r, n in zip(removed, n_neurons)], n_neurons, device, classes) for _ in range(n_random)]
 
-        runs = [evaluate(model, x, y, label, layers, [rng.permutation(len(order))[: n_kept(order, fraction)] for order in reference], device) for _ in range(n_random)]
-        results["random"].append({metric: np.mean([run[metric] for run in runs], axis=0) for metric in runs[0]})
+    return {metric: np.mean([run[metric] for run in runs], axis=0) for metric in runs[0]}
 
-    return {name: {metric: np.array([row[metric] for row in rows]) for metric in rows[0]} for name, rows in results.items()}
+
+def compare_ablation(model: nn.Module, x: torch.Tensor, y: np.ndarray, label: int, layer: nn.Module, removed: np.ndarray, n_neurons: int, device: str, n_random: int = 5, classes: list = None):
+    # uma camada: remoção dos neurônios do SAE e remoção aleatória (mesma quantidade); cada um é {métrica: valor}, e acc_per_class tem um valor por classe do teste
+    sae = ablated_metrics(model, x, y, label, [layer], [removed], [n_neurons], device, classes)
+    random = random_metrics(model, x, y, label, [layer], [removed], [n_neurons], device, n_random, classes)
+
+    return {"sae": sae, "random": random}
 
 
 def shapes(results: dict):
@@ -97,33 +93,18 @@ def accuracy_log(prefix: str, result: dict, step: int):
     return {f"{prefix}/acc_total": result["acc_all"][step], **{f"{prefix}/acc_label_{c}": acc for c, acc in enumerate(result["acc_per_class"][step])}}
 
 
-def log_ablation(run_name: str, config: dict, results: dict, fractions: np.ndarray):
-    wandb_run = setup_wandb(run_name=run_name, config=config)
 
-    for step, fraction in enumerate(fractions):
-        wandb_run.log({
-            "ablation/fraction_removed": 100 * fraction,
-            **accuracy_log("ablation", results["sae"], step),
-            **accuracy_log("ablation/ig", results["ig"], step),
-        }, step=step)
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", classes=[], layer_names=None, ablated_layers=None, fraction=0.02, n_modes=10, batch_size=64, setup: Setup=None):
+    setup = setup or Setup(dataset_type=dataset_type, model_type=model_type, layer_names=layer_names, classes=classes)
 
-    wandb_run.finish()
+    model, layers, device = setup.load_checkpoint(model_path), setup.layers, setup.device
 
-
-def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", label=[1, 6, 7], layer_names=None, ablated_layers=None, n_steps=20):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    model = setup_model(model_type=model_type, device=device).eval()
-
-    model.load_state_dict(torch.load(f"{model_path}/model.pt", map_location=device))
-
-    layers, reduction = setup_layers(model=model, model_type=model_type, layer_names=layer_names)
-
-    _, test_dataloader = setup_dataset(dataset_type=dataset_type)
-
-    test_dataset_x, test_dataset_y = setup_test_data(test_dataloader)
+    test_dataset_x, test_dataset_y = setup.test_data()  # todas as classes: y e preds são o próprio id do dataset
 
     test_dataset_x = test_dataset_x.to(device)
+
+    class_names = dataset_class_names(setup.dataset_type)
+    setup.visualizer.class_names = class_names
 
     dictionaries = [np.load(f"{model_path}/dictionary_layer_{layer}.npy") for layer in range(len(layers))]
     corrs = [np.load(f"{model_path}/corr_layer_{layer}.npy") for layer in range(len(layers))]
@@ -133,37 +114,20 @@ def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", l
     if not ablated_layers:
         raise ValueError("nenhuma camada tem modos vivos: refaça a interpretação com outros hiperparâmetros do SAE")
 
-    scope, _ = compute_contributions(model=model, layers=layers, reduction=reduction, test_dataset_x=test_dataset_x, test_dataset_y=test_dataset_y)
-    scope.inspector.remove_hooks()
+    labels = np.unique(test_dataset_y) if setup.classes is None else setup.classes
 
-    labels = [label] if isinstance(label, int) else list(label)
+    for label in labels:  # id do dataset = linha da corr = posição em y
+        print(f"Classe: {class_names[label]}")
 
-    fractions = np.linspace(0, 1, n_steps + 1)
+        intact = evaluate(model, test_dataset_x, test_dataset_y, label, [], [], device)  # não depende da camada: calculado uma vez por classe
 
-    visualizer = Visualization(dataset=dataset_type, network=model_type)
+        for layer in ablated_layers:  # uma camada por vez: uma figura por camada e classe
+            n_neurons = dictionaries[layer].shape[1]
+            removed = top_neurons(dictionaries[layer], corrs[layer], label, fraction, n_modes)
 
-    date = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y - %H:%M")
+            results = {"intact": intact, **compare_ablation(model, test_dataset_x, test_dataset_y, label, layers[layer], removed, n_neurons, device)}
 
-    for digit in labels:
-        print(f"Digit: {digit}")
-
-        orders = {layer: rank_neurons(dictionaries[layer], corrs[layer], digit) for layer in ablated_layers}
-        orders = {layer: order for layer, order in orders.items() if order is not None}
-
-        if not orders:
-            print(f"Dígito {digit}: nenhuma camada tem modos desse dígito, ablação pulada \n")
-            continue
-
-        print(f"Orders (Per layer): {list(orders.values())}", f"Dim: {[order.shape for order in orders.values()]} \n")
-
-        ig_orders = [rank_neurons_ig(scope.log_contributions[layer], test_dataset_y, digit) for layer in orders]
-        print(f"Orders IG (Per layer): {ig_orders}", f"Dim: {[order.shape for order in ig_orders]} \n")
-
-        results = sweep(model, test_dataset_x, test_dataset_y, digit, [layers[layer] for layer in orders], {"sae": list(orders.values()), "ig": ig_orders}, fractions, device)
-
-        visualizer.plot_ablation(results, digit, fractions)
-
-        log_ablation(f"Ablation_{model_type}_label{digit}_{date}", {"ablation/label": digit, "ablation/ablated_layers": list(orders), "ablation/replacement": "zero"}, results, fractions)
+            setup.visualizer.plot_ablation(results, label, layer, len(removed) / n_neurons)  # fração realmente removida: a união dos modos pode passar de `fraction`
 
 
 if __name__ == "__main__":

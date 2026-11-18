@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from datetime import datetime
 from tqdm import tqdm
 from zoneinfo import ZoneInfo
-from setup import setup_dataset, setup_model, setup_loss_type, setup_optimizer, setup_wandb
+from setup import Setup
 
 
 def train(n_epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoader, optimizer: optim, model: nn.Module, criterion: nn, wandb_run, lr: int, device: str):
@@ -62,38 +62,28 @@ def test(test_dataloader, model: nn.Module, criterion, device):
 
             predicted = logits.argmax(dim=1)
 
-            loss_sum += criterion(logits, test_y).item() * test_y.size(0)
-            total += test_y.size(0)
+            loss_sum += criterion(logits, test_y).item() * test_y.shape[0]
+            total += test_y.shape[0]
             correct += (predicted == test_y).sum().item()    
 
     return 100 * correct / total, loss_sum / total
     
 
 
-def main(checkpoints="checkpoint/test", dataset: str ="Mnist", model: str ="MLP", loss_type: str ="CrossEntropy", optimizer_type: str = "Adam", n_epochs: int = 20):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    train_dataloader, test_dataloader = setup_dataset(dataset_type=dataset)
-
-    model = setup_model(model_type=model, device=device)
-
-    criterion = setup_loss_type(loss_type=loss_type)
-
-    lr = 0.001
-
-    optimizer = setup_optimizer(model=model, optimizer_type=optimizer_type, learning_rate=lr)
+def main(checkpoints="checkpoint/test", dataset: str ="Mnist", model: str ="MLP", loss_type: str ="CrossEntropy", optimizer_type: str = "Adam", n_epochs: int = 20, setup: Setup = None):
+    setup = setup or Setup(dataset_type=dataset, model_type=model, loss_type=loss_type, optimizer_type=optimizer_type)
 
     date = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
-    wandb_run = setup_wandb(run_name=f"{type(model).__name__}_{optimizer_type}_{date.strftime('%d/%m/%Y - %H:%M')}", config=None)
+    wandb_run = setup.init_wandb(run_name=f"{type(setup.model).__name__}_{setup.optimizer_type}_{date.strftime('%d/%m/%Y - %H:%M')}", config=None)
 
-    train(n_epochs=n_epochs, train_dataloader=train_dataloader, test_dataloader=test_dataloader, optimizer=optimizer, model=model, criterion=criterion, wandb_run=wandb_run, lr=lr, device=device)
+    train(n_epochs=n_epochs, train_dataloader=setup.train_dataloader, test_dataloader=setup.test_dataloader, optimizer=setup.optimizer, model=setup.model, criterion=setup.criterion, wandb_run=wandb_run, lr=setup.learning_rate, device=setup.device)
 
     wandb_run.finish()
 
     os.makedirs(checkpoints, exist_ok=True)
 
-    torch.save(model.state_dict(), os.path.join(checkpoints, "model.pt"))
+    torch.save(setup.model.state_dict(), os.path.join(checkpoints, "model.pt"))
 
 
 if __name__ == "__main__":
