@@ -59,7 +59,7 @@ def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", l
     else:
         test_dataset_x, test_dataset_y = setup.test_observations(model_path)
 
-    softmax = setup.model_type != "DQN" and not setup.is_tabular  # tabular: alvo escalar, sem softmax; Q-values do DQN não são logits: sem softmax (igual ao IG em contributions.py)
+    softmax = setup.model_type not in ("DQN", "MultiDiscreteActorCritic") and not setup.is_tabular  # tabular: alvo escalar, sem softmax; Q-values do DQN não são logits: sem softmax (igual ao IG em contributions.py)
 
     rgb_images = setup.is_image and test_dataset_x.shape[1] == 3
     examples = display(test_dataset_x[np.unique(test_dataset_y, return_index=True)[1]]) if rgb_images else None  # 1ª imagem de cada classe = a do mapa da máscara (n_images=1)

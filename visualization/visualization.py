@@ -193,9 +193,9 @@ class Visualization:
         ax_total.bar(np.arange(n_neurons), np.abs(weights).sum(0), color=self.BLUE)
         ax_total.set_xticks(np.arange(n_neurons), neurons, rotation=90)
         ax_total.set_xlabel("número do neurônio")
-        ax_total.set_ylabel("Contribuição do neurônio ao modo.")
+        ax_total.set_ylabel("Contribuição.")
 
-        fig.suptitle(f"Layer {layer + 1}: {len(modes)} modos mais correlacionados com a classe {self.name(label)}", fontsize=11)
+        fig.suptitle(f"Camada {layer + 1}: Modos mais correlacionados com a classe {self.name(label)}", fontsize=11)
 
         self.save_figure(fig, f"2_neurônios_por_modos_na_classe:{label}_camada{layer + 1}.png")
 
@@ -377,10 +377,99 @@ class Visualization:
             ax.axvline(label, color="#b58900", ls="--", lw=1)  # a classe analisada
             ax.set_ylim(-0.02, 1.05)
             ax.set_ylabel("acurácia")
-            ax.set_title(f"{texts[name]} | acc total {result['acc_all']:.2f}, prevista como {self.name(label)} {result['frac_pred_label']:.2f}", fontsize=9, loc="left")
+            ax.set_title(f"{texts[name]} | acc total {result['acc_all']:.2f}, output como {self.name(label)}: {result['frac_pred_label']:.2f}", fontsize=9, loc="left")
 
         axes[-1, 0].set_xlabel("classes do dataset de teste")
 
         fig.suptitle(title, fontsize=10)
 
         self.save_figure(fig, f"{prefix}_camada{layer + 1}_{self.name(label).replace('/', '_')}.png")
+
+
+    def plot_group_importance(self, grouped: np.ndarray, group_names: list, importance: np.ndarray, labels: list, top_k: int = 15, xlabel: str = "|IG| médio no logit da ação", filename: str = "5_importancia_por_grupo_de_variaveis.png"):
+        # grouped: [classes, grupos] (fração da importância IG por tipo de variável); importance: [classes, variáveis] (|IG| médio) para o top-k de variáveis individuais
+        n_classes = len(labels)
+        names = self.observation_names or []
+        var_name = lambda i: names[i] if i < len(names) else str(i)
+
+        order = np.argsort(-grouped.max(0))[:12]  # só os tipos de variável que mais pesam em alguma classe
+        fig, axes = plt.subplots(1, 2, figsize=(15, 5 + 0.15 * len(order)), layout="constrained", gridspec_kw={"width_ratios": [1.1, 1.3]})
+
+        left = axes[0]
+        im = left.imshow(grouped[:, order].T, cmap=self.POSITIVE, vmin=0, aspect="auto")
+        left.set_yticks(range(len(order)), [group_names[i] for i in order], fontsize=8)
+        left.set_xticks(range(n_classes), [self.name(l) for l in labels], fontsize=8, rotation=30, ha="right")
+        left.grid(False)
+
+        for (row, col), value in np.ndenumerate(grouped[:, order].T):
+            left.text(col, row, f"{100 * value:.0f}%", ha="center", va="center", fontsize=7, color="black" if value < 0.5 * grouped[:, order].max() else "white")
+
+        left.set_title("Fração da importância (|IG|) por tipo de variável")
+        fig.colorbar(im, ax=left, shrink=0.6)
+
+        right = axes[1]
+        top = np.unique(np.argsort(-importance, axis=1)[:, :top_k // 2])  # união dos melhores de cada classe
+        width = 0.8 / n_classes
+        colors = [self.BLUE, self.RED, "#859900", "#b58900", "#6c71c4", "#2aa198"]
+
+        for c, label in enumerate(labels):
+            right.barh(np.arange(len(top)) + c * width, importance[c, top], height=width, color=colors[c % len(colors)], label=self.name(label))
+
+        right.set_yticks(np.arange(len(top)) + 0.4 - width / 2, [var_name(i) for i in top], fontsize=7)
+        right.invert_yaxis()
+        right.set_xlabel(xlabel)
+        right.set_title(f"Variáveis individuais mais importantes (top {len(top)})")
+        right.legend(fontsize=8)
+
+        fig.suptitle("Em que o agente se baseia para escolher cada ação", fontsize=11)
+
+        self.save_figure(fig, filename)
+
+
+    def plot_layer_activity(self, activations: list, y: np.ndarray, labels: list, pca, threshold: float = 0.5):
+        # activations: por camada [amostras, neurônios] (pós-tanh); y: ação escolhida em cada amostra; esparsidade = fração de neurônios com |ativação| > threshold
+        n_layers = len(activations)
+        colors = [self.BLUE, self.RED, "#859900", "#b58900", "#6c71c4", "#2aa198"]
+        fig, axes = plt.subplots(n_layers, 3, figsize=(17, 4.6 * n_layers), layout="constrained", squeeze=False)
+
+        for layer, act in enumerate(activations):
+            active = np.abs(act) > threshold
+
+            # (a) neurônios ligados por amostra, por ação (+ todas as outras)
+            ax = axes[layer, 0]
+            groups = [(self.name(l), active[y == l].mean(1)) for l in labels] + [("outras", active[~np.isin(y, labels)].mean(1))]
+            groups = [(name, values) for name, values in groups if len(values)]
+            ax.boxplot([values for _, values in groups], tick_labels=[name for name, _ in groups], showfliers=False)
+            ax.tick_params(axis="x", labelsize=7, rotation=20)
+            ax.set_ylabel("fração de neurônios ligados")
+            ax.set_title(f"Camada {layer + 1}: esparsidade por ação (|ativação| > {threshold})")
+
+            # (b) ativação média de cada neurônio por ação (neurônios ordenados pela ação principal)
+            ax = axes[layer, 1]
+            means = np.stack([act[y == l].mean(0) for l in labels if (y == l).any()])
+            order = np.argsort(-means.argmax(0) * 1e3 - means.max(0))  # agrupa neurônios pela ação que mais os ativa
+            im = ax.imshow(means[:, order], cmap=self.DIVERGING, vmin=-1, vmax=1, aspect="auto")
+            ax.set_yticks(range(len(means)), [self.name(l) for l in labels if (y == l).any()], fontsize=8)
+            ax.set_xlabel("neurônio (ordenado pela ação que mais o ativa)")
+            ax.set_title(f"Camada {layer + 1}: ativação média por ação")
+            ax.grid(False)
+            fig.colorbar(im, ax=ax, shrink=0.6)
+
+            # (c) PCA 2D das ativações
+            ax = axes[layer, 2]
+            points, variance = pca(act)
+            others = ~np.isin(y, labels)
+            ax.scatter(*points[others].T, s=3, color=self.LINE, alpha=0.3, label="outras ações")
+
+            for c, label in enumerate(labels):
+                mask = y == label
+                ax.scatter(*points[mask].T, s=4, color=colors[c % len(colors)], alpha=0.5, label=self.name(label))
+
+            ax.set_xlabel(f"PC1 ({100 * variance[0]:.0f}% da variância)")
+            ax.set_ylabel(f"PC2 ({100 * variance[1]:.0f}%)")
+            ax.set_title(f"Camada {layer + 1}: ativações em 2D (PCA)")
+            ax.legend(fontsize=7, markerscale=3)
+
+        fig.suptitle("Como as camadas do agente organizam as observações por ação", fontsize=11)
+
+        self.save_figure(fig, "6_ativacao_e_esparsidade_por_camada.png")

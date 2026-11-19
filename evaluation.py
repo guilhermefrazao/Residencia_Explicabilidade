@@ -6,6 +6,7 @@ from contribution.contributions import main as interpret_contributions
 from contribution.contribution_maps import main as contribution_maps
 from patching.neural_ablation import main as ablation
 from patching.neural_preservation import main as preservation
+from contribution.model_analysis import main as model_analysis
 
 
 def main(config: str):
@@ -18,9 +19,12 @@ def main(config: str):
 
     contribution_maps(model_path=checkpoints, setup=setup)
 
-    ablation(model_path=checkpoints, classes=configs.classes, batch_size=configs.ig_batch_size, setup=setup)
+    ablation(model_path=checkpoints, classes=configs.classes, setup=setup)
 
-    preservation(model_path=checkpoints, classes=configs.classes, batch_size=configs.ig_batch_size, setup=setup)
+    preservation(model_path=checkpoints, classes=configs.classes, setup=setup)
+
+    if setup.is_reinforcement:
+        model_analysis(model_path=checkpoints, setup=setup)
 
 
 if __name__ == "__main__":

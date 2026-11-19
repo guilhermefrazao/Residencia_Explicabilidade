@@ -8,12 +8,13 @@ from setup import Setup, dataset_class_names
 from contribution.utils import predict, class_modes
 
 
-def top_neurons(dictionary: np.ndarray, corr: np.ndarray, label: int, fraction: float = 0.02, n_modes: int = 10):
-    # neurônios a remover: em cada um dos n_modes modos mais correlacionados com a classe (os mesmos dos mapas), os `fraction` de maior |peso| no dicionário; união entre os modos
+def top_neurons(dictionary: np.ndarray, corr: np.ndarray, label: int, fraction: float = 0.02, n_modes: int = 2):
     modes = class_modes(corr, [label], n_modes)[0]
     n_top = max(1, round(fraction * dictionary.shape[1]))
 
-    top = np.argsort(-np.abs(dictionary[modes]), axis=1, kind="stable")[:, :n_top]
+    mode_values_abs = -np.abs(dictionary[modes])
+
+    top = np.argsort(mode_values_abs, axis=1, kind="stable")[:, :n_top]
 
     print(f"modes_correlation: {modes}", f"Label: {label} | neurônios removidos: {len(np.unique(top))} de {dictionary.shape[1]} \n")
 
@@ -124,7 +125,7 @@ def accuracy_log(prefix: str, result: dict, step: int):
 
 
 
-def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", classes=[], layer_names=None, fraction=0.02, n_modes=10, batch_size=64, setup: Setup=None):
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", classes=[], layer_names=None, fraction=0.02,setup: Setup=None):
     setup = setup or Setup(dataset_type=dataset_type, model_type=model_type, layer_names=layer_names, classes=classes)
 
     model, layers, device = setup.load_checkpoint(model_path), setup.layers, setup.device
@@ -150,7 +151,7 @@ def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", c
                 continue
 
             n_neurons = dictionaries[layer].shape[1]
-            removed = top_neurons(dictionaries[layer], corrs[layer], label, fraction, n_modes)
+            removed = top_neurons(dictionaries[layer], corrs[layer], label, fraction)
 
             results = {"intact": intact, **compare_ablation(model, test_dataset_x, test_dataset_y, label, layers[layer], removed, n_neurons, device, means=None if means is None else [means[layer]])}
 

@@ -26,7 +26,7 @@ def compare_preservation(model: nn.Module, x: torch.Tensor, y: np.ndarray, label
     return {"sae": sae, "random": random}
 
 
-def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", classes=[], layer_names=None, fraction=0.02, n_modes=10, batch_size=64, setup: Setup=None):
+def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", classes=[], layer_names=None, fraction=0.02, setup: Setup=None):
     setup = setup or Setup(dataset_type=dataset_type, model_type=model_type, layer_names=layer_names, classes=classes)
 
     model, layers, device = setup.load_checkpoint(model_path), setup.layers, setup.device
@@ -56,7 +56,7 @@ def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", c
                 continue
 
             n_neurons = dictionaries[layer].shape[1]
-            kept = top_neurons(dictionaries[layer], corrs[layer], label, fraction, n_modes)
+            kept = top_neurons(dictionaries[layer], corrs[layer], label, fraction, 2)
 
             results = {"intact": intact, **compare_preservation(model, test_dataset_x, test_dataset_y, label, layers[layer], kept, n_neurons, device, means=None if means is None else [means[layer]])}
 

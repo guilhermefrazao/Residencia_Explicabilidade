@@ -50,20 +50,22 @@ def sae_contributions(setup: Setup, scope: bscope.Scope, model_path: str):
         contributions_dim = data.shape[1]
         positive_contributions = torch.from_numpy(data).float().to(device)
 
-        theashold = 0.8
-        lr = 5e-5
-        batch_size = 128
-        n_epochs = 300
         global_step = 0
-        l1_regularization = 5e-5
+        threshold= 0.8
+        lr= 0.001
+        batch_size= 128
+        n_epochs= 300
+        l1_regularization= 0.00005
+        atoms_multiplier= 3
+        hidden_dim= 128
 
-        sae = NNSTSAE(data_dim=contributions_dim, num_atoms=3 * contributions_dim, threshold=theashold, mlp_hidden_dim=contributions_dim).to(device)
+        sae = NNSTSAE(data_dim=contributions_dim, num_atoms=atoms_multiplier * contributions_dim, threshold=threshold, mlp_hidden_dim=hidden_dim).to(device)
 
         optimizer = setup.create_optimizer(sae, "Adam", lr)
 
         date = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
-        wandb_run = setup.init_wandb(f"Sparse_Autoencoders_{l}_{date.strftime('%d/%m/%Y - %H:%M')}", config={"sae/train/n_epochs": n_epochs, "sae/train/input_dim": contributions_dim, "sae/train/theashold": theashold, "sae/train/learning_rate": lr, "sae/train/batch_size": batch_size})
+        wandb_run = setup.init_wandb(f"Sparse_Autoencoders_{l}_{date.strftime('%d/%m/%Y - %H:%M')}", config={"sae/train/n_epochs": n_epochs, "sae/train/input_dim": contributions_dim, "sae/train/theashold": threshold, "sae/train/learning_rate": lr, "sae/train/batch_size": batch_size})
 
         progress_bar = tqdm(range(n_epochs), desc=f"{type(sae).__name__} - camada {l + 1}", position=0, leave=True)
 

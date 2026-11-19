@@ -5,10 +5,6 @@ from setup import Setup
 from training.supervized_learning import main as train_supervized
 from training.unsupervized_learning import main as train_unsupervized
 from training.reinforcement_learning import main as train_reinforcement
-from contribution.contributions import main as interpret_contributions
-from contribution.contribution_maps import main as contribution_maps
-from patching.neural_ablation import main as ablation
-from patching.neural_preservation import main as preservation
 
 
 def main(config: str):
