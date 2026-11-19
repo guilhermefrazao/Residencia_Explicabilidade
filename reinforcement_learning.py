@@ -13,6 +13,7 @@ from torch import nn
 from tqdm import tqdm
 from zoneinfo import ZoneInfo
 from setup import Setup
+from config.config import Configs
 
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward'))
@@ -155,16 +156,40 @@ def train(num_episodes: int, env, memory: ReplayMemory, policy_net: nn.Module, t
     return episode_durations
 
 
-def main(checkpoints="checkpoint/test", dataset: str="CartPole-v1", model: str="DQN", loss_type: str="SmoothL1", optimizer_type: str="AdamW", render: bool=False, setup: Setup=None):
-    BATCH_SIZE = 128
-    GAMMA = 0.99
-    EPS_START = 0.9
-    EPS_END = 0.01
-    EPS_DECAY = 2500
-    TAU = 0.005
-    LR = 3e-4
+def collect_observations(env, policy_net: nn.Module, n_steps: int, device: str):
+    """Roda o agente guloso (sem exploração) no ambiente e guarda as observações vistas e a ação escolhida em cada uma."""
+    observations, actions = [], []
+    policy_net.eval()
 
-    setup = setup or Setup(dataset_type=dataset, model_type=model, loss_type=loss_type, optimizer_type=optimizer_type, learning_rate=LR, render=render)
+    state, _ = env.reset()
+
+    while len(observations) < n_steps:
+        state_t = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+
+        with torch.no_grad():
+            action = policy_net(state_t).argmax(1).item()
+
+        observations.append(state_t.squeeze(0).cpu())
+        actions.append(action)
+
+        state, _, terminated, truncated, _ = env.step(action)
+
+        if terminated or truncated:
+            state, _ = env.reset()
+
+    policy_net.train()
+
+    return torch.stack(observations), torch.tensor(actions, dtype=torch.long)
+
+
+def main(checkpoints="checkpoint/DQN_CartPole_Critic", dataset: str="CartPole-v1", model: str="DQN", loss_type: str="SmoothL1", optimizer_type: str="AdamW", render: bool=False, setup: Setup=None, configs: Configs=None):
+    # hiperparâmetros vêm de configs (config/*.yml); sem configs, valem os defaults de Configs
+    configs = configs or Configs(learning_type="reinforcement", dataset=dataset, model=model, loss_type=loss_type, optimizer_type=optimizer_type, learning_rate=3e-4, render=render, checkpoints=os.path.basename(checkpoints))
+
+    BATCH_SIZE, GAMMA, EPS_START, EPS_END, EPS_DECAY, TAU = configs.batch_size, configs.gamma, configs.eps_start, configs.eps_end, configs.eps_decay, configs.tau
+    LR = configs.learning_rate
+
+    setup = setup or Setup(dataset_type=dataset, model_type=model, loss_type=loss_type, optimizer_type=optimizer_type, learning_rate=LR, render=render, experiment_name=configs.experiment_name)
 
     # o Setup já dimensiona a rede pelos espaços de ação e observação do ambiente
     env, device, policy_net, criterion, optimizer = setup.environment, setup.device, setup.model, setup.criterion, setup.optimizer
@@ -172,13 +197,11 @@ def main(checkpoints="checkpoint/test", dataset: str="CartPole-v1", model: str="
     target_net = setup.create_model()
     target_net.load_state_dict(policy_net.state_dict())
 
-    MEMORY_CAPACITY = 10000
+    MEMORY_CAPACITY = configs.memory_capacity
+    N_TEST_OBSERVATIONS = configs.n_test_observations
     memory = ReplayMemory(MEMORY_CAPACITY)
 
-    if torch.cuda.is_available() or torch.backends.mps.is_available():
-        num_episodes = 600
-    else:
-        num_episodes = 50
+    num_episodes = configs.num_episodes
 
     date = datetime.now(ZoneInfo("America/Sao_Paulo"))
 
@@ -206,7 +229,13 @@ def main(checkpoints="checkpoint/test", dataset: str="CartPole-v1", model: str="
 
     os.makedirs(checkpoints, exist_ok=True)
 
-    torch.save(policy_net.state_dict(), os.path.join(checkpoints, "model.pt"))
+    torch.save(policy_net.state_dict(), os.path.join(checkpoints, "model_actor.pt"))
+
+    torch.save(target_net.state_dict(), os.path.join(checkpoints, "model.pt"))
+
+    # observações do agente treinado: servem de dataset de teste para as contribuições (IG)
+    observations, actions = collect_observations(env, policy_net, N_TEST_OBSERVATIONS, device)
+    torch.save({"observations": observations, "actions": actions}, os.path.join(checkpoints, "observations.pt"))
 
 
 if __name__ == "__main__":

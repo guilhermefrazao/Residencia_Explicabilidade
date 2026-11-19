@@ -7,3 +7,5 @@ pyarrow>=26.0.1
 pygame-ce==2.5.8
 scikit-learn==1.9.1
 pandas==3.1.1
+pyyaml>=6.0
+

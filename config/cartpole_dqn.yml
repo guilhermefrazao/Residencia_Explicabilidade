@@ -1,0 +1,21 @@
+experiment_name: ""
+learning_type: reinforcement
+checkpoints: DQN_CartPole
+dataset: CartPole-v1
+model: DQN
+loss_type: SmoothL1
+optimizer_type: AdamW
+learning_rate: 0.0003
+classes: null
+ig_batch_size: 64
+
+batch_size: 128
+gamma: 0.99
+tau: 0.005
+eps_start: 0.9
+eps_end: 0.01
+eps_decay: 2500
+memory_capacity: 10000
+num_episodes: 600
+n_test_observations: 1000
+render: false

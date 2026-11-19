@@ -38,14 +38,14 @@ def train(n_epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoad
                 "losses/train_loss": loss.item(),
             })
 
-        accuracy, test_loss = test(test_dataloader, model=model, criterion=criterion, device=device)
+        metric, test_loss, metric_name = test(test_dataloader, model=model, criterion=criterion, device=device)
 
         wandb_run.log({
-            "eval/accuracy": accuracy,
+            f"eval/{metric_name}": metric,
             "losses/test_loss": test_loss
         })
 
-        progress_bar.set_postfix(train_loss=f"{loss.item():.4f}", test_loss=f"{test_loss:.4f}", accuracy=f"{accuracy:.2f}%")
+        progress_bar.set_postfix(train_loss=f"{loss.item():.4f}", test_loss=f"{test_loss:.4f}", **{metric_name: f"{metric:.2f}%" if metric_name == "accuracy" else f"{metric:.3f}"})
 
             
     return 
@@ -53,6 +53,7 @@ def train(n_epochs: int, train_dataloader: DataLoader, test_dataloader: DataLoad
 
 def test(test_dataloader, model: nn.Module, criterion, device):
     correct, total, loss_sum =  0, 0, 0.0 
+    outputs, targets = [], []
     with torch.no_grad():
         model.eval()
         for test_x, test_y in test_dataloader:
@@ -60,13 +61,20 @@ def test(test_dataloader, model: nn.Module, criterion, device):
 
             logits = model(test_x)
 
-            predicted = logits.argmax(dim=1)
-
             loss_sum += criterion(logits, test_y).item() * test_y.shape[0]
             total += test_y.shape[0]
-            correct += (predicted == test_y).sum().item()    
 
-    return 100 * correct / total, loss_sum / total
+            if logits.dim() == 1:  # regressão: um valor por amostra
+                outputs.append(logits), targets.append(test_y)
+            else:
+                correct += (logits.argmax(dim=1) == test_y).sum().item()
+
+    if outputs:  # regressão: R² = 1 - SQ_resíduo / SQ_total
+        outputs, targets = torch.cat(outputs), torch.cat(targets)
+
+        return (1 - ((targets - outputs) ** 2).sum() / ((targets - targets.mean()) ** 2).sum()).item(), loss_sum / total, "r2"
+
+    return 100 * correct / total, loss_sum / total, "accuracy"
     
 
 

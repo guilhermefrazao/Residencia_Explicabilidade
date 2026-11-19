@@ -1,0 +1,32 @@
+# Modelo completo: todos os parâmetros aceitos por Configs (config/config.py). Copie e ajuste para um experimento.
+
+# identificação
+experiment_name: ""        # prefixo da pasta de figuras images/<experiment_name>_... e dos runs no wandb (vazio = sem prefixo); o checkpoint não leva prefixo
+learning_type: supervized  # supervized | unsupervized | reinforcement
+checkpoints: MLP_Mnist     # nome base da pasta dentro de checkpoint/
+
+# dados e modelo
+dataset: Mnist             # Mnist | Imagenet | California_Housing | CartPole-v1
+model: MLP
+loss_type: CrossEntropy
+optimizer_type: Adam
+learning_rate: 0.001
+n_epochs: 20
+
+# interpretação
+layer_names: null
+reduction: null
+classes: null              # lista de nomes ou ids; null sorteia
+ig_batch_size: 16
+
+# aprendizado por reforço (ignorado nos demais)
+batch_size: 128
+gamma: 0.99
+tau: 0.005
+eps_start: 0.9
+eps_end: 0.01
+eps_decay: 2500
+memory_capacity: 10000
+num_episodes: 600
+n_test_observations: 1000
+render: false

@@ -26,22 +26,18 @@ class MultilayerPerceptron(nn.Module):
 
 
 class MultilayerPerceptronRegression(nn.Module):
-    def __init__(self):
+    def __init__(self, n_features: int):
         super().__init__()
-        self.flatten = nn.Flatten()
         self.network = nn.Sequential(
-            nn.Linear(28*28, 16), 
+            nn.Linear(n_features, 16),
             nn.ReLU(),
             nn.Linear(16, 16),
             nn.ReLU(),
-            nn.Linear(16, 10)
+            nn.Linear(16, 1)
             )
 
     def forward(self, x):
-        x = self.flatten(x)
-        logits = self.network(x)
-
-        return logits
+        return self.network(x).squeeze(-1)  # [B, 1] -> [B], o mesmo formato do alvo
 
 
 class ConvolutionalNeuralNetwork(nn.Module):

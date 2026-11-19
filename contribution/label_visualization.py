@@ -26,7 +26,7 @@ def main(classes: list, layers: list, n_images: int = 100, model_path: str = "ch
         if loadings.shape[1] == 0:
             continue
 
-        for label in (np.unique(y) if setup.classes is None else setup.classes):
+        for label in setup.labels:
             images, modes = select_label_images(x, y, loadings, label, n_images)
 
             setup.visualizer.plot_label_images(images, modes, label, layer)

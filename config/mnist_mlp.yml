@@ -1,0 +1,11 @@
+experiment_name: ""
+learning_type: supervized
+checkpoints: MLP_Mnist
+dataset: Mnist
+model: MLP
+loss_type: CrossEntropy
+optimizer_type: Adam
+learning_rate: 0.001
+n_epochs: 20
+classes: null
+ig_batch_size: 64

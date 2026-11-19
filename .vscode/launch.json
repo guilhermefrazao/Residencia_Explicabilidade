@@ -30,6 +30,17 @@
         "request": "launch",
         "module": "train",
         "cwd": "${workspaceFolder}",
+        "args": ["--config", "config/cartpole_dqn.yml"],
+        "justMyCode": true,
+        "subProcess": false
+        },
+        {
+        "name": "Evaluating",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "evaluation",
+        "cwd": "${workspaceFolder}",
+        "args": ["--config", "config/cartpole_dqn.yml"],
         "justMyCode": true,
         "subProcess": false
         }
