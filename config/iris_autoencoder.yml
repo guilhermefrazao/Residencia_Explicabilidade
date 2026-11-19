@@ -1,0 +1,11 @@
+experiment_name: "Testing"
+learning_type: unsupervized
+checkpoints: AE_Iris
+dataset: Iris
+model: Autoencoder
+loss_type: MSE
+optimizer_type: Adam
+learning_rate: 0.01
+n_epochs: 300
+classes: null
+ig_batch_size: 64

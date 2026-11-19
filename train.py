@@ -2,9 +2,9 @@ import argparse
 
 from config.config import Configs
 from setup import Setup
-from supervized_learning import main as train_supervized
-from unsupervized_learning import main as train_unsupervized
-from reinforcement_learning import main as train_reinforcement
+from training.supervized_learning import main as train_supervized
+from training.unsupervized_learning import main as train_unsupervized
+from training.reinforcement_learning import main as train_reinforcement
 from contribution.contributions import main as interpret_contributions
 from contribution.contribution_maps import main as contribution_maps
 from patching.neural_ablation import main as ablation
@@ -25,14 +25,6 @@ def main(config: str):
 
     if configs.learning_type == "reinforcement":
         train_reinforcement(checkpoints=checkpoints, setup=setup, configs=configs)
-
-    interpret_contributions(model_path=checkpoints, batch_size=configs.ig_batch_size, setup=setup, classes=configs.classes)
-
-    contribution_maps(model_path=checkpoints, setup=setup)
-
-    ablation(model_path=checkpoints, classes=configs.classes, batch_size=configs.ig_batch_size, setup=setup)
-
-    preservation(model_path=checkpoints, classes=configs.classes, batch_size=configs.ig_batch_size, setup=setup)
 
 
 if __name__ == "__main__":
