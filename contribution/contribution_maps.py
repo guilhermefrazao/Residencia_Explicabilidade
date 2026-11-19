@@ -5,17 +5,17 @@ from setup import Setup, MAX_TEST_DATA, dataset_class_names, dataset_observation
 from contribution.utils import spatial_sum, class_modes, display
 
 
-def mode_maps(model: nn.Module, images: torch.Tensor, atoms: np.ndarray, layer: nn.Module, device: str, softmax: bool = True):
+def mode_maps(model: nn.Module, images: torch.Tensor, atoms: np.ndarray, layer: nn.Module, device: str, softmax: bool = True, scalar: bool = False):
     images = images.to(device).clone().requires_grad_()
 
     captured = []
     handle = layer.register_forward_hook(lambda module, inputs, output: captured.append(output))
     outputs = model(images)
-    target = outputs if outputs.dim() == 1 else torch.softmax(outputs, dim=-1) if softmax else outputs  # regressão (saída [B]): o alvo é o próprio valor previsto  # softmax=False: a saída já é o alvo (Q-values no RL)
+    target = torch.softmax(outputs, dim=-1) if softmax else outputs  # softmax=False: a saída já é o alvo (Q-values no RL)
     handle.remove()
 
     h = captured[0]
-    dy_dh, = torch.autograd.grad((target if target.dim() == 1 else target.max(1).values).sum(), h, retain_graph=True)
+    dy_dh, = torch.autograd.grad((target.sum() if scalar else target.max(1).values.sum()), h, retain_graph=True)
 
     atoms = torch.as_tensor(atoms, dtype=h.dtype, device=device)
     per_channel = spatial_sum(h * dy_dh)
@@ -35,13 +35,13 @@ def mode_maps(model: nn.Module, images: torch.Tensor, atoms: np.ndarray, layer: 
     return torch.stack(positive).cpu().numpy(), torch.stack(negative).cpu().numpy()
 
 
-def class_mode_maps(model: nn.Module, x: torch.Tensor, y: np.ndarray, atoms: np.ndarray, modes: np.ndarray, layer: nn.Module, device: str, softmax: bool = True, n_images: int = None):
+def class_mode_maps(model: nn.Module, x: torch.Tensor, y: np.ndarray, atoms: np.ndarray, modes: np.ndarray, layer: nn.Module, device: str, softmax: bool = True, n_images: int = None, scalar: bool = False):
     # n_images: quantas imagens de cada classe entram no mapa (a 1ª, a 2ª...); None = todas, até MAX_TEST_DATA
     positives, negatives = [], []
 
     for label, class_modes in zip(np.unique(y), modes):
         images = x[torch.from_numpy(y == label)][:n_images or MAX_TEST_DATA]
-        positive, negative = mode_maps(model, images, atoms[class_modes], layer, device, softmax)
+        positive, negative = mode_maps(model, images, atoms[class_modes], layer, device, softmax, scalar)
 
         positives.append(positive)
         negatives.append(negative)
@@ -59,7 +59,7 @@ def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", l
     else:
         test_dataset_x, test_dataset_y = setup.test_observations(model_path)
 
-    softmax = setup.model_type != "DQN"  # Q-values do DQN não são logits: sem softmax (igual ao IG em contributions.py)
+    softmax = setup.model_type != "DQN" and not setup.is_tabular  # tabular: alvo escalar, sem softmax; Q-values do DQN não são logits: sem softmax (igual ao IG em contributions.py)
 
     rgb_images = setup.is_image and test_dataset_x.shape[1] == 3
     examples = display(test_dataset_x[np.unique(test_dataset_y, return_index=True)[1]]) if rgb_images else None  # 1ª imagem de cada classe = a do mapa da máscara (n_images=1)
@@ -77,13 +77,13 @@ def main(model_path="checkpoint/test", dataset_type="Mnist", model_type="MLP", l
         setup.visualizer.observation_names = dataset_observation_names(setup.dataset_type)
 
         if setup.is_image:
-            single, _ = class_mode_maps(model, test_dataset_x, test_dataset_y, atoms, modes, layer, setup.device, softmax, n_images=1)  # a imagem mostrada na coluna "original"
-            mean, _ = class_mode_maps(model, test_dataset_x, test_dataset_y, atoms, modes, layer, setup.device, softmax)  # média da classe
+            single, _ = class_mode_maps(model, test_dataset_x, test_dataset_y, atoms, modes, layer, setup.device, softmax, n_images=1, scalar=setup.is_tabular)  # a imagem mostrada na coluna "original"
+            mean, _ = class_mode_maps(model, test_dataset_x, test_dataset_y, atoms, modes, layer, setup.device, softmax, scalar=setup.is_tabular)  # média da classe
 
             setup.visualizer.class_names = dataset_class_names(setup.dataset_type)  # nomes indexados por id; as linhas são posições: labels[i] é o id da linha i
             setup.visualizer.plot_class_mode_maps_images(single, mean, index, modes, setup.labels, examples)
         else:
-            positive, _ = class_mode_maps(model, test_dataset_x, test_dataset_y, atoms, modes, layer, setup.device, softmax)
+            positive, _ = class_mode_maps(model, test_dataset_x, test_dataset_y, atoms, modes, layer, setup.device, softmax, scalar=setup.is_tabular)
 
             setup.visualizer.plot_class_mode_maps_vector(positive, index, modes, setup.labels)
 

@@ -11,7 +11,6 @@ from visualization.visualization import Visualization
 
 
 def ig_contributions(model: nn.Module, layers: list, reduction: list, test_dataset_x: torch.Tensor, batch_size: int = 64, baseline: bool = False, regression: bool = False):
-    # regression=True: saída escalar (preço); o alvo é o próprio valor previsto, com a observação média como referência
     scope = bscope.Scope(ScalarOutput(model) if regression else model, layers, to_numpy=True)
     scope.use_int_grad(steps=10)
 

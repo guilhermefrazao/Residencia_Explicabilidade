@@ -3,7 +3,7 @@ import numpy as np, torch
 
 from contextlib import contextmanager
 from torch import nn
-from setup import IMAGENET_MEAN, IMAGENET_STD, random_labels, price_band  # random_labels vive em setup.py (o Setup a usa para sortear self.labels); re-exportada aqui
+from setup import IMAGENET_MEAN, IMAGENET_STD, random_labels, price_band, nearest_species  # random_labels vive em setup.py (o Setup a usa para sortear self.labels); re-exportada aqui
 
 bscope_scope = importlib.import_module("bscope.scope")
 
@@ -32,14 +32,16 @@ import numpy as np
 
 
 class ScalarOutput(nn.Module):
-    """Modelo de regressão com saída [B] visto como [B, 1], formato que os alvos do bscope esperam; as camadas são as do modelo original."""
+    """Saída escalar [B] vista como [B, 1] (formato que os alvos do bscope esperam); saídas já 2-D passam sem mudança. As camadas são as do modelo original."""
 
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
 
     def forward(self, x):
-        return self.model(x).unsqueeze(-1)
+        out = self.model(x)
+
+        return out.unsqueeze(-1) if out.dim() == 1 else out
 
 
 def spatial_sum(x):
@@ -50,8 +52,12 @@ def predict(model: nn.Module, x: torch.Tensor, device: str, classes: list = None
     with torch.no_grad():
         outputs = torch.cat([model(chunk.to(device)).cpu() for chunk in x.split(100)])
 
-    # regressão (saída [B]): a "classe prevista" é a faixa do preço previsto
-    preds = price_band(outputs.numpy()) if outputs.dim() == 1 else outputs.argmax(1).numpy()
+    if outputs.dim() == 1:  # regressão (saída [B]): a "classe prevista" é a faixa do preço previsto
+        preds = price_band(outputs.numpy())
+    elif outputs.shape == x.shape and outputs.dim() == 2:  # autoencoder tabular: a classe é a espécie do centróide mais próximo da reconstrução
+        preds = nearest_species(outputs.numpy())
+    else:
+        preds = outputs.argmax(1).numpy()
 
     if classes is None:
         return preds

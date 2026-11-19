@@ -15,7 +15,7 @@ from torch import nn
 from functools import cached_property, lru_cache
 from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset
 from torchvision import transforms
-from networks import ConvolutionalNeuralNetwork, MultilayerPerceptron, MultilayerPerceptronRegression, ResNet50, Autoencoder, DQN
+from training.networks import ConvolutionalNeuralNetwork, MultilayerPerceptron, MultilayerPerceptronRegression, ResNet50, Autoencoder, DQN
 
 
 class ParquetImageDataset(Dataset):
@@ -49,29 +49,38 @@ LAYER_CONFIG = {
     "ResNet50": {"layers": ["layer1", "layer2", "layer3", "layer4"], "reduction": ["ei_split", "spatial_sum"]},
     "DQN": {"layers": ["layer1", "layer2"], "reduction": ["ei_split"]},
     "MLPRegression": {"layers": ["network.0", "network.2"], "reduction": ["ei_split"]},
+    "Autoencoder": {"layers": ["encoder.0", "encoder.2", "decoder.0"], "reduction": ["ei_split"]},
 }
 
 
 # O Gymnasium não expõe o que cada índice da observação mede: cadastre aqui os nomes de cada ambiente
 OBSERVATION_NAMES = {
     "CartPole-v1": ["posição", "vel. carrinho", "ângulo", "vel. angular"],
+    "Iris": ["comprimento da sépala", "largura da sépala", "comprimento da pétala", "largura da pétala"],
     "California_Housing": ["renda mediana", "idade da casa", "média de cômodos", "média de quartos", "população", "média de ocupantes", "latitude", "longitude"],
 }
 
 IMAGE_DATASETS = ("Mnist", "Imagenet")
-TABULAR_DATASETS = ("California_Housing",)
+TABULAR_DATASETS = ("California_Housing", "Iris")
+IRIS_SPECIES = ["setosa", "versicolor", "virginica"]
 PRICE_BANDS = ["baixo", "médio", "alto"]  # California Housing: as "classes" são faixas do preço (tercis do treino)
 
 
-CALIFORNIA_HOUSING_CSV, CALIFORNIA_HOUSING_TARGET = "datasets/California_Housing/california_housing.csv", "MedHouseVal"
+# dataset tabular -> (csv, coluna do alvo, o alvo é uma classe inteira?)
+TABULAR_CSV = {
+    "California_Housing": ("datasets/California_Housing/california_housing.csv", "MedHouseVal", False),
+    "Iris": ("datasets/Iris/iris.csv", "target", True),
+}
 
 
-@lru_cache(maxsize=1)
-def california_housing_splits(train_fraction: float = 0.8, seed: int = 0):
+@lru_cache(maxsize=None)
+def tabular_splits(dataset_type: str, train_fraction: float = 0.8, seed: int = 0):
     """{True: treino, False: teste} como TensorDataset(features, alvo); as features são padronizadas com a média e o desvio do treino."""
-    data = pd.read_csv(CALIFORNIA_HOUSING_CSV)
-    features = data.drop(columns=CALIFORNIA_HOUSING_TARGET).to_numpy(np.float32)
-    target = data[CALIFORNIA_HOUSING_TARGET].to_numpy(np.float32)
+    csv, target_column, is_class = TABULAR_CSV[dataset_type]
+
+    data = pd.read_csv(csv)
+    features = data.drop(columns=target_column).to_numpy(np.float32)
+    target = data[target_column].to_numpy(np.int64 if is_class else np.float32)
 
     order = np.random.default_rng(seed).permutation(len(data))
     train, test = order[:int(train_fraction * len(data))], order[int(train_fraction * len(data)):]
@@ -83,7 +92,7 @@ def california_housing_splits(train_fraction: float = 0.8, seed: int = 0):
 @lru_cache(maxsize=1)
 def price_band_edges():
     """Cortes (tercis do preço no treino) que separam as faixas PRICE_BANDS: len(PRICE_BANDS) - 1 valores."""
-    prices = california_housing_splits()[True].tensors[1].numpy()
+    prices = tabular_splits("California_Housing")[True].tensors[1].numpy()
 
     return np.quantile(prices, np.linspace(0, 1, len(PRICE_BANDS) + 1)[1:-1])
 
@@ -93,6 +102,19 @@ def price_band(prices: np.ndarray):
     return np.digitize(prices, price_band_edges())
 
 
+@lru_cache(maxsize=1)
+def iris_centroids():
+    """Média (padronizada) das features de cada espécie no treino: [3, 4]."""
+    x, y = tabular_splits("Iris")[True].tensors
+
+    return torch.stack([x[y == c].mean(0) for c in range(len(IRIS_SPECIES))]).numpy()
+
+
+def nearest_species(reconstructed: np.ndarray):
+    """Espécie do centróide mais próximo de cada reconstrução: o "classificador" que dá sentido a acerto/erro de classe num autoencoder."""
+    return np.linalg.norm(reconstructed[:, None, :] - iris_centroids()[None], axis=2).argmin(1)
+
+
 def dataset_observation_names(dataset_type: str):
     return OBSERVATION_NAMES.get(dataset_type)  # None: ambiente sem nomes cadastrados (o plot usa o índice)
 
@@ -100,6 +122,9 @@ def dataset_observation_names(dataset_type: str):
 def dataset_class_names(dataset_type: str):
     if dataset_type == "Imagenet":
         return torchvision.models.ResNet50_Weights.IMAGENET1K_V1.meta["categories"]
+
+    if dataset_type == "Iris":
+        return IRIS_SPECIES
 
     if dataset_type in TABULAR_DATASETS:
         return PRICE_BANDS
@@ -128,9 +153,9 @@ class Setup:
 
         if dataset_type in ("Mnist", "Imagenet"):
             self.train_dataloader, self.test_dataloader = self.create_dataloaders()
-        elif dataset_type == "California_Housing":
+        elif dataset_type in TABULAR_DATASETS:
             self.train_dataloader, self.test_dataloader = self.create_dataloaders()
-            self.model_kwargs = {"n_features": california_housing_splits()[True].tensors[0].shape[1]}
+            self.model_kwargs = {"n_features": tabular_splits(dataset_type)[True].tensors[0].shape[1]}
         else:
             self.environment = gym.make(dataset_type, render_mode="human" if render else None)
             self.model_kwargs = {"n_observations": len(self.environment.reset()[0]), "n_actions": self.environment.action_space.n}
@@ -159,8 +184,8 @@ class Setup:
 
             return DataLoader(data, batch_size=64, num_workers=2, pin_memory=True, shuffle=train, persistent_workers=True)
 
-        elif self.dataset_type == "California_Housing":
-            return DataLoader(california_housing_splits()[train], batch_size=64, shuffle=train)  # tudo em memória: sem workers
+        elif self.dataset_type in TABULAR_DATASETS:
+            return DataLoader(tabular_splits(self.dataset_type)[train], batch_size=64, shuffle=train)  # tudo em memória: sem workers
 
         elif self.dataset_type == "Imagenet":
             normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
@@ -195,7 +220,7 @@ class Setup:
 
         if self.is_tabular:
             features, prices = dataset.tensors
-            targets = price_band(prices.numpy())  # regressão: a "classe" de cada amostra é a faixa do preço
+            targets = price_band(prices.numpy()) if self.dataset_type == "California_Housing" else prices.numpy()  # regressão: a "classe" é a faixa do preço; Iris: a espécie
         else:
             targets = np.asarray(dataset.targets)
 
@@ -245,7 +270,7 @@ class Setup:
             return ResNet50().to(self.device)
 
         elif self.model_type == "Autoencoder":
-            return Autoencoder().to(self.device)
+            return Autoencoder(**self.model_kwargs).to(self.device)
 
         elif self.model_type == "DQN":
             return DQN(**self.model_kwargs).to(self.device)
